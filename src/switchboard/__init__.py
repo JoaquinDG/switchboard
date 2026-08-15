@@ -51,7 +51,14 @@ from .triage import (
     classify_with_model,
     triage_task,
 )
-from .router import RoutingDecision, ScoredModel, actual_cost, estimate_cost, route
+from .router import (
+    RoutingDecision,
+    ScoredModel,
+    actual_cost,
+    estimate_cost,
+    route,
+    score_models,
+)
 
 __version__ = "0.3.0"
 
@@ -108,6 +115,7 @@ __all__ = [
     "mock_pool",
     "pick_auditor",
     "route",
+    "score_models",
     "triage_task",
     "usable_registry",
 ]

@@ -93,6 +93,42 @@ def _highest_tier(models: list[ModelSpec]) -> list[ModelSpec]:
     return [m for m in models if TIER_RANK.get(m.tier, 0) == best]
 
 
+def score_models(
+    task: Task, candidates: list[ModelSpec], registry: Registry, policy: Policy
+) -> list[ScoredModel]:
+    """Score candidates under a policy, best first.
+
+    Costs are normalized over the FULL catalog, not just the candidates:
+    candidate-only min-max made scores extreme (with 2 candidates one is always
+    0.0), letting a normalization artifact flip decisions.
+
+    Public because escalation needs the identical calculation. Picking the
+    escalation target by raw capability instead meant routing honoured the
+    policy and escalation ignored it — so a cost-first run could fail an audit
+    and jump straight to the priciest model in the catalog.
+    """
+    all_costs = [estimate_cost(task, m) for m in registry.all()]
+    min_cost, max_cost = min(all_costs), max(all_costs)
+
+    scored: list[ScoredModel] = []
+    for spec in candidates:
+        cost = estimate_cost(task, spec)
+        quality = spec.capability_for(task.task_type)
+        cost_s = _cost_score(cost, min_cost, max_cost)
+        latency_s = _LATENCY_SCORE[spec.latency]
+        if task.needs_fast_response and spec.latency == "slow":
+            latency_s = 0.0
+        total = (
+            policy.quality_weight * quality
+            + policy.cost_weight * cost_s
+            + policy.latency_weight * latency_s
+        )
+        scored.append(ScoredModel(spec, total, quality, cost_s, latency_s, cost))
+
+    scored.sort(key=lambda s: s.score, reverse=True)
+    return scored
+
+
 def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
     """Rank all eligible models and return an explained decision."""
     candidates = registry.all()
@@ -179,28 +215,7 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
             candidates = _highest_tier(candidates)
             gates.append("qualification filter applied (none qualified; degraded upward)")
 
-    # Normalize costs over the FULL catalog, not just surviving candidates:
-    # candidate-only min-max made scores extreme (with 2 candidates, one is
-    # always 0.0), letting normalization artifacts flip decisions.
-    all_costs = [estimate_cost(task, m) for m in registry.all()]
-    min_cost, max_cost = min(all_costs), max(all_costs)
-    costs = [estimate_cost(task, m) for m in candidates]
-
-    scored: list[ScoredModel] = []
-    for spec, cost in zip(candidates, costs):
-        quality = spec.capability_for(task.task_type)
-        cost_s = _cost_score(cost, min_cost, max_cost)
-        latency_s = _LATENCY_SCORE[spec.latency]
-        if task.needs_fast_response and spec.latency == "slow":
-            latency_s = 0.0
-        total = (
-            policy.quality_weight * quality
-            + policy.cost_weight * cost_s
-            + policy.latency_weight * latency_s
-        )
-        scored.append(ScoredModel(spec, total, quality, cost_s, latency_s, cost))
-
-    scored.sort(key=lambda s: s.score, reverse=True)
+    scored = score_models(task, candidates, registry, policy)
     top = scored[0]
 
     parts = [

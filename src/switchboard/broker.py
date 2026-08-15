@@ -32,7 +32,7 @@ from .policies import Policy, Task
 from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
 from .registry import TIER_RANK, ModelSpec, Registry
-from .router import RoutingDecision, actual_cost, route
+from .router import RoutingDecision, actual_cost, route, score_models
 from .triage import AUTO, Triage, triage_task
 
 _ESCALATION_ORDER = {"small": "mid", "mid": "frontier", "frontier": None}
@@ -330,10 +330,15 @@ class Broker:
     def _escalation_target(
         self, spec: ModelSpec, task: Task, tried: set[str]
     ) -> ModelSpec | None:
-        """Best model in the next tier up, judged on *this task's* type.
+        """Best model in the next tier up, scored under the same policy.
 
-        Previously hardcoded to "reasoning", so a failed coding task escalated
-        to whichever model reasoned best rather than the one that codes best.
+        Two corrections live here. It was once hardcoded to "reasoning", so a
+        failed coding task escalated to whichever model reasoned best. It then
+        maximised capability for the task type — which quietly ignored the
+        policy, so a cost-first run could fail an audit and jump to the
+        priciest model in the catalog. Moving up a tier is already the quality
+        step; *which* model in that tier is still a cost/quality tradeoff, and
+        the policy is what decides tradeoffs.
         """
         tier = _ESCALATION_ORDER.get(spec.tier)
         while tier is not None:
@@ -341,7 +346,7 @@ class Broker:
             untried = [m for m in candidates if m.model_id not in tried]
             pool = untried or candidates
             if pool:
-                return max(pool, key=lambda m: m.capability_for(task.task_type))
+                return score_models(task, pool, self.registry, self.policy)[0].spec
             tier = _ESCALATION_ORDER.get(tier)
         return None
 

@@ -106,6 +106,36 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(result.attempts[0].model_id, "cheap")
         self.assertEqual(result.attempts[1].model_id, "coder")
 
+    def test_escalation_respects_the_policy_not_just_capability(self):
+        # Regression: escalation maximised capability and ignored the policy,
+        # so a cost-first run could fail an audit and jump to the priciest
+        # model in the catalog. Moving up a tier is the quality step; which
+        # model within that tier is still a cost/quality tradeoff.
+        registry = Registry([
+            ModelSpec("cheap", "labA", "small", 0.1, 0.5, latency="fast",
+                      capabilities={"reasoning": 0.5, "audit": 0.4}),
+            ModelSpec("frontier-value", "labB", "frontier", 2.0, 12.0,
+                      capabilities={"reasoning": 0.92, "audit": 0.9}),
+            ModelSpec("frontier-premium", "labC", "frontier", 10.0, 50.0,
+                      capabilities={"reasoning": 0.95, "audit": 0.9}),
+        ])
+        task = Task(prompt="x", task_type="reasoning", complexity=0.3)
+        pool = ProviderPool([ScriptedProvider(name=n, default=FAIL_VERDICT)
+                             for n in ("labA", "labB", "labC")])
+
+        def escalation_target(policy):
+            # Exercised directly rather than through a full run: under a
+            # quality-first policy the *initial* route already lands on
+            # frontier, so a full run has no escalation step to observe. The
+            # choice of target is the unit under test.
+            broker = Broker(registry, pool, policy)
+            return broker._escalation_target(
+                registry.get("cheap"), task, tried=set()
+            ).model_id
+
+        self.assertEqual(escalation_target(Policy("cf", 0.30, 0.60, 0.10)), "frontier-value")
+        self.assertEqual(escalation_target(Policy("qf", 0.85, 0.05, 0.10)), "frontier-premium")
+
     def test_attempt_roles_are_recorded(self):
         task = Task(prompt="FORCE_AUDIT_FAIL easy", task_type="extraction", complexity=0.2)
         result = make_broker().run(task)
