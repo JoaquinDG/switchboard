@@ -7,7 +7,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 206 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 212 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -54,26 +54,40 @@ The same pipeline on the synthetic demo catalog (`--catalog` omitted) routes to 
 
 ## What happened when it ran for real
 
-On 2026-08-15 the suite in `examples/live_run.py` ran against **Anthropic, OpenAI and DeepSeek** — five tasks, twice, under two auditor policies. Ten real cross-lab audits. Total spend: **$0.084**.
+On 2026-08-15 the suite in `examples/live_run.py` ran against **Anthropic, OpenAI, DeepSeek and Kimi** — three runs, fifteen real cross-lab audits, **$0.16 total**. Every number below is measured, not modelled.
 
-| | default auditor (`most_capable`) | `cheapest_qualified` |
+### Finding 1: the token ceiling was manufacturing fake quality failures
+
+Same tasks, same models, same policy. Only `--max-tokens` changed:
+
+| | 400 | 1200 |
+|---|---|---|
+| Verified | 3/5 | **4/5** |
+| Escalations | 2 | **1** |
+
+At 400, `claude-opus-5` spent **340 of its 400 output tokens thinking** and returned almost no visible text. `stop_reason: max_tokens`. The auditor called it empty — correctly — the broker read that as a quality failure and escalated to a stronger model, which would have truncated at exactly the same ceiling. Reasoning models truncate *sooner*, because thinking spends the same budget.
+
+The adapter had been discarding `stop_reason` entirely, so a mechanical failure was indistinguishable from a bad answer. `Completion.truncated` now carries it, the audit names it before any quality finding, and `BrokerResult.truncated` surfaces it. **Escalating on truncation is pure waste** — the fix is a bigger ceiling, not a bigger model.
+
+### Finding 2: verification, not inference, dominates the bill
+
+| | default auditor | `cheapest_qualified` |
 |---|---|---|
 | Generation, routed | $0.01633 | $0.01721 |
 | Generation, strongest model | $0.03623 | $0.02493 |
 | **Routing saved on generation** | **55%** | **31%** |
 | Audit overhead | $0.04609 (**74% of spend**) | $0.00472 (22%) |
 | Total | $0.06242 | $0.02193 |
-| Verified | 3/5 | 3/5 |
 
-Four things this measured that no amount of mocking could:
+On the summarization task the audit cost **188x the generation it graded**. The audit prompt carries the task, the output *and* the rubric, so it has a floor a small task cannot amortise. `auditor_selection="cheapest_qualified"` cut audit cost 90% and total spend 65%, reaching the same pass/fail on all five tasks — one needed an extra escalation to get there, because the cheap auditor was *stricter* on first pass. n=5; suggestive, not settled.
 
-**1. Routing saves on generation, and audits can eat the saving whole.** With the default frontier auditor, verification was 74% of total spend — on the summarization task the audit cost **188x the generation it graded**. The audit prompt carries the task, the output, *and* the rubric, so it has a floor that a small task cannot amortise. Switching to `auditor_selection="cheapest_qualified"` cut audit cost 90% and total spend 65%, reaching the same pass/fail on all five tasks. (One needed an extra escalation to get there — the cheap auditor was *stricter* on first pass. n=5; suggestive, not settled.)
+### Finding 3: cross-lab auditing caught real defects
 
-**2. Cross-lab auditing caught real defects.** `claude-opus-5` flagged that a `median()` written by `deepseek-v4-flash` returned an `int` where its annotation promised `float`. Better: on the reasoning task, `gpt-5.6-sol` caught `claude-opus-5` **inventing per-token prices that were never in the prompt**. A same-lab audit is exactly where you would expect that to slide.
+`claude-opus-5` flagged that a `median()` written by `deepseek-v4-flash` returned an `int` where its annotation promised `float`. Better: on the reasoning task, `gpt-5.6-sol` caught `claude-opus-5` **inventing per-token prices that were never in the prompt**. A same-lab audit is exactly where you would expect that to slide through.
 
-**3. Unverified means unverified.** 2 of 5 came back `verified: False`, including one where the cheap model *and* the escalation both failed. The system said so rather than shipping it.
+### Finding 4: unverified means unverified
 
-**4. The estimates were wrong by orders of magnitude.** Declared-token estimates missed actual cost by up to 90x, because they price generation only while the bill includes verification. The 78% figure below is an *estimate excluding audits*; the measured number including them is the table above.
+The one remaining failure scored 0.68 against a 0.70 threshold — a real quality judgment, not a mechanical one. It was returned flagged rather than shipped.
 
 Reproduce with `examples/live_check.py` (free) then `examples/live_run.py --live`.
 
@@ -125,7 +139,7 @@ Routing runs gates before scores:
 
 ## Starter catalog
 
-`examples/starter_catalog.json` is a working catalog of **12 models across 4 providers** (Anthropic, OpenAI, Google, DeepSeek), four models per tier. It is what makes the demos show real model names instead of `atlas-small`, and four providers is deliberate — cross-lab auditing needs somewhere to cross to.
+`examples/starter_catalog.json` is a working catalog of **16 models across 5 providers** (Anthropic, OpenAI, Google, DeepSeek, Kimi/Moonshot). It is what makes the demos show real model names instead of `atlas-small`, and four providers is deliberate — cross-lab auditing needs somewhere to cross to.
 
 The line between what was measured and what was guessed is the whole point of the file, so it is drawn explicitly:
 
@@ -146,7 +160,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 206 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 212 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -166,6 +180,7 @@ Guards, because this is the one part of the repo that can cost you: dry-run is t
 | `openai` | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `deepseek` | `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com/api_keys) |
 | `google` | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `moonshot` (Kimi) | `MOONSHOT_API_KEY` | [platform.kimi.ai](https://platform.kimi.ai/console/api-keys) |
 
 Any subset works. Providers without a key are skipped and named, and `usable_registry` narrows the catalog to what's actually wired up — so a missing key reads as a smaller catalog rather than a mysterious outage. Cross-lab auditing needs two.
 
@@ -239,6 +254,8 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 9. **`api_key=""` silently used the ambient environment key.** `api_key or os.environ.get(...)` treats an explicit empty string as "unset", so a caller passing a config value that failed to load would have billed whatever account happened to be exported in the shell instead of failing loudly. A test asserted the right behaviour and had passed for the wrong reason — there was simply no env key to fall through to. It surfaced the moment real keys were present, and made an unintended API call on the way out.
 10. **The live runner's own summary was apples-to-oranges.** It compared total spend *including* audits against a baseline computed *without* them, charging routing for verification the baseline never paid for. Now reported as three separate lines, because routing and verification are separate economic decisions.
 
+11. **A token ceiling was being misdiagnosed as poor quality.** The adapters discarded `stop_reason`, so an answer cut off at `max_tokens` looked identical to a complete bad one. A reasoning model that spent 340 of 400 output tokens thinking returned almost nothing, failed its audit as "empty", and triggered a paid escalation to a model that would truncate at the same ceiling. Raising the ceiling took the suite from 3/5 verified with 2 escalations to 4/5 with 1. Truncation is now carried on `Completion.truncated`, named by the auditor before any quality finding, and surfaced on `BrokerResult`.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -308,7 +325,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               206 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               212 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
 examples/            quickstart, agentic workflow, live_check + live_run, starter + template catalogs
 ```

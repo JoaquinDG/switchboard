@@ -90,9 +90,13 @@ class StarterCatalogTests(unittest.TestCase):
         self.raw = json.loads(STARTER.read_text())
         self.registry = Registry.from_json(STARTER)
 
-    def test_has_twelve_models_across_four_providers(self):
-        self.assertEqual(len(self.registry), 12)
-        self.assertEqual(len({m.provider for m in self.registry.all()}), 4)
+    def test_spans_enough_models_and_providers_to_be_useful(self):
+        # Lower bounds, not exact counts: the catalog is meant to grow, and a
+        # hardcoded total turns every addition into a test failure that says
+        # nothing about whether the addition was correct.
+        self.assertGreaterEqual(len(self.registry), 12)
+        providers = {m.provider for m in self.registry.all()}
+        self.assertGreaterEqual(len(providers), 4, f"only {providers}")
 
     def test_more_than_one_provider_per_tier(self):
         # Cross-lab auditing needs somewhere to cross to, and provider failover

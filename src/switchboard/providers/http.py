@@ -231,6 +231,7 @@ class AnthropicProvider(_HTTPProviderBase):
             model_id=model_id,
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
+            stop_reason=data.get("stop_reason", "") or "",
         )
 
 
@@ -316,4 +317,5 @@ class OpenAICompatibleProvider(_HTTPProviderBase):
             model_id=model_id,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
+            stop_reason=choice.get("finish_reason", "") or "",
         )

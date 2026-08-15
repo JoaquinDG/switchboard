@@ -130,8 +130,8 @@ def main() -> int:
                         help="actually call the APIs. Without this, nothing is billed.")
     parser.add_argument("--budget-usd", type=float, default=0.50,
                         help="hard spend cap for the whole run (default: 0.50). The guard\n     is priced at the worst case; real spend is typically 10-30x lower because\n     routing sends most of the suite to cheap models.")
-    parser.add_argument("--max-tokens", type=int, default=400,
-                        help="output ceiling per call (default: 400)")
+    parser.add_argument("--max-tokens", type=int, default=1200,
+                        help="output ceiling per call (default: 1200). Reasoning\n     models spend thinking tokens from this same budget — at 400 one spent 340\n     of them thinking and returned almost nothing, then failed its audit.")
     parser.add_argument("--trace", default="traces/live.jsonl")
     args = parser.parse_args()
 
@@ -213,6 +213,9 @@ def main() -> int:
 
         spent += result.total_cost_usd
         rows.append((label, result))
+        # Compare generation to generation. Setting total-with-audit against a
+        # generation-only estimate reads as a 90x miss when most of the gap is
+        # simply verification the estimate never claimed to cover.
         estimated = estimate_cost(task, live_registry.get(result.final_model))
 
         print(f"{label}")
@@ -227,12 +230,16 @@ def main() -> int:
                 lab = f" by {a.auditor_model} ({'cross-lab' if a.cross_lab_audit else 'same-lab'})"
             print(f"   attempt {i}: {a.model_id} [{a.role}] {note}{lab} "
                   f"{a.input_tokens}->{a.output_tokens} tok  ${a.total_cost_usd:.5f}")
+        if result.truncated:
+            print(f"   TRUNCATED at max_tokens ({args.max_tokens}) — raise the ceiling, "
+                  f"not the model tier")
         if result.attempts and result.attempts[-1].audit_issues:
             for issue in result.attempts[-1].audit_issues[:3]:
                 print(f"     issue: {issue}")
         print(f"   verified: {result.verified}")
-        print(f"   cost:     ${result.total_cost_usd:.5f} actual "
-              f"vs ${estimated:.5f} estimated from declared tokens")
+        print(f"   cost:     generation ${result.generation_cost_usd:.5f} actual "
+              f"vs ${estimated:.5f} estimated at declared tokens; "
+              f"+ ${result.audit_cost_usd:.5f} audit = ${result.total_cost_usd:.5f}")
         print(f"   output:   {result.final_text.strip()[:90].replace(chr(10), ' ')}...")
         print()
 

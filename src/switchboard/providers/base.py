@@ -51,6 +51,21 @@ class Completion:
     model_id: str
     input_tokens: int = 0
     output_tokens: int = 0
+    # Why generation stopped, verbatim from the vendor ("end_turn", "stop",
+    # "max_tokens", "length"). Discarding this made truncation indistinguishable
+    # from a complete answer: a reasoning model that spends its whole budget
+    # thinking returns little or no visible text, the auditor fails it as poor
+    # quality, and the broker pays for an escalation that will truncate again.
+    stop_reason: str = ""
+
+    @property
+    def truncated(self) -> bool:
+        """True when the vendor cut generation off at the token ceiling.
+
+        A truncated output is a mechanical failure, not a quality one. Raising
+        max_tokens fixes it; a bigger model does not.
+        """
+        return self.stop_reason in ("max_tokens", "length")
 
 
 class Provider(Protocol):

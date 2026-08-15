@@ -203,6 +203,17 @@ def audit(
     result = provider.complete(auditor_spec.model_id, prompt)
     passed, score, issues = _parse_verdict(result.text)
 
+    if output.truncated:
+        # The auditor sees a cut-off answer and quite reasonably calls it
+        # incomplete. Without this line the trace reads as a quality failure
+        # and the obvious response is "escalate", which buys a stronger model
+        # that will truncate at the same ceiling — and reasoning models
+        # truncate sooner, because thinking spends the same budget.
+        issues = [
+            f"output was TRUNCATED by the provider (stop_reason="
+            f"{output.stop_reason!r}); raise max_tokens rather than escalating"
+        ] + list(issues)
+
     if passed and score < policy.audit_pass_threshold:
         # The auditor said pass, the policy disagrees. Record why, so a trace
         # reader is not left wondering where the failure came from.

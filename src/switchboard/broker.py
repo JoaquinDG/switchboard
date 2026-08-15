@@ -60,6 +60,12 @@ class Attempt:
     cross_lab_audit: bool | None = None
     # True when this attempt was given the previous audit's findings to fix.
     had_audit_feedback: bool = False
+    # Vendor stop reason, and whether it means the output was cut off at the
+    # token ceiling. Truncation is a mechanical failure: escalating to a
+    # stronger model does not fix it, and reasoning models truncate *more*
+    # because thinking tokens come out of the same budget.
+    stop_reason: str = ""
+    truncated: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
@@ -106,6 +112,15 @@ class BrokerResult:
     def escalated(self) -> bool:
         """True if a failed audit pushed the work up a tier."""
         return sum(1 for a in self.attempts if a.role == "escalation") > 0
+
+    @property
+    def truncated(self) -> bool:
+        """True if the final attempt was cut off at the token ceiling.
+
+        Distinct from `verified`: a truncated answer usually fails its audit,
+        but the fix is a bigger `max_tokens`, not a bigger model.
+        """
+        return bool(self.attempts and self.attempts[-1].truncated)
 
     @property
     def failed_over(self) -> bool:
@@ -249,6 +264,8 @@ class Broker:
                     auditor_model=None if verdict is None else verdict.auditor_model,
                     cross_lab_audit=None if verdict is None else verdict.cross_lab,
                     had_audit_feedback=bool(feedback),
+                    stop_reason=output.stop_reason,
+                    truncated=output.truncated,
                     input_tokens=output.input_tokens,
                     output_tokens=output.output_tokens,
                     cost_usd=actual_cost(spec, output.input_tokens, output.output_tokens),
@@ -392,6 +409,7 @@ class Broker:
             "verified": result.verified,
             "escalated": result.escalated,
             "failed_over": result.failed_over,
+            "truncated": result.truncated,
             "underqualified": result.underqualified,
             # Top-level so a trace query can ask "what share of our verified
             # results were signed off by a model from the same lab?"

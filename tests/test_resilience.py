@@ -212,6 +212,91 @@ class HTTPRetryTests(unittest.TestCase):
                 provider.complete("m", "hi")
 
 
+class TruncationTests(unittest.TestCase):
+    """A cut-off answer is a mechanical failure, not a quality one.
+
+    Found live: a reasoning model spent 340 of its 400 output tokens thinking,
+    got truncated, returned almost no visible text, failed its audit as "empty",
+    and triggered a paid escalation to a model that would truncate identically.
+    """
+
+    def anthropic_response(self, stop_reason, text="partial"):
+        return {
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 10, "output_tokens": 400},
+            "stop_reason": stop_reason,
+        }
+
+    def complete_with(self, payload):
+        with mock.patch(
+            "switchboard.providers.http.urllib.request.urlopen",
+            return_value=FakeResponse(payload),
+        ):
+            return AnthropicProvider(api_key="k").complete("m", "hi")
+
+    def test_max_tokens_is_reported_as_truncated(self):
+        result = self.complete_with(self.anthropic_response("max_tokens"))
+        self.assertEqual(result.stop_reason, "max_tokens")
+        self.assertTrue(result.truncated)
+
+    def test_normal_stop_is_not_truncated(self):
+        self.assertFalse(self.complete_with(self.anthropic_response("end_turn")).truncated)
+
+    def test_openai_length_is_truncated(self):
+        payload = {
+            "choices": [{"message": {"content": "partial"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 400},
+        }
+        with mock.patch(
+            "switchboard.providers.http.urllib.request.urlopen",
+            return_value=FakeResponse(payload),
+        ):
+            result = OpenAICompatibleProvider(api_key="k").complete("m", "hi")
+        self.assertEqual(result.stop_reason, "length")
+        self.assertTrue(result.truncated)
+
+    def test_missing_stop_reason_is_not_truncated(self):
+        # Absence of evidence is not evidence of truncation.
+        self.assertFalse(self.complete_with({"content": [], "usage": {}}).truncated)
+
+    def test_audit_names_truncation_before_any_quality_finding(self):
+        # The note must come first: a reader scanning issues should see the
+        # mechanical cause before the auditor's (correct but misleading)
+        # complaint that the answer looks incomplete.
+        from switchboard import BALANCED, Completion, ProviderPool, ScriptedProvider, Task, audit, demo_registry
+
+        registry = demo_registry()
+        provider = ScriptedProvider(
+            {"atlas-frontier": ['{"pass": false, "score": 0.1, "issues": ["looks incomplete"]}']},
+            name="mock",
+        )
+        verdict = audit(
+            Task(prompt="x", task_type="summarization"),
+            Completion(text="cut off mid-", model_id="atlas-small", stop_reason="max_tokens"),
+            registry.get("atlas-small"), registry, ProviderPool([provider]), BALANCED,
+        )
+        self.assertIn("TRUNCATED", verdict.issues[0])
+        self.assertIn("raise max_tokens", verdict.issues[0])
+        self.assertIn("looks incomplete", verdict.issues[1])
+
+    def test_broker_surfaces_truncation_on_the_result(self):
+        from switchboard import BALANCED, Broker, ProviderPool, Task, demo_registry
+
+        class TruncatingProvider:
+            name = "mock"
+            def complete(self, model_id, prompt, max_tokens=1024):
+                from switchboard import Completion
+                if "You are auditing" in prompt:
+                    return Completion('{"pass": false, "score": 0.1, "issues": []}', model_id, 5, 5)
+                return Completion("cut off", model_id, 5, 400, stop_reason="max_tokens")
+
+        result = Broker(demo_registry(), ProviderPool([TruncatingProvider()]), BALANCED).run(
+            Task(prompt="x", task_type="summarization", complexity=0.2))
+        self.assertTrue(result.truncated)
+        self.assertTrue(result.attempts[-1].truncated)
+        self.assertEqual(result.attempts[-1].stop_reason, "max_tokens")
+
+
 class OpenAIAdapterTests(unittest.TestCase):
     OK = {
         "choices": [{"message": {"content": "hi there"}}],

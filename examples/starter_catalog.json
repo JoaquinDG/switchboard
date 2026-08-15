@@ -1,6 +1,5 @@
 {
   "_last_verified": "2026-08-15",
-
   "_disclaimer": [
     "READ THIS BEFORE TRUSTING ANY NUMBER IN THIS FILE.",
     "",
@@ -13,7 +12,7 @@
     "CAPABILITY SCORES ARE ESTIMATES. They are one engineer's priors about",
     "relative model strength, not measurements. No benchmark was run to",
     "produce them and none is implied. They are here so the catalog loads and",
-    "routes out of the box — replace them with numbers from your own evals on",
+    "routes out of the box \u2014 replace them with numbers from your own evals on",
     "your own traffic before using this to make real routing decisions. The",
     "router is only as good as this field, which is why the README says the",
     "catalog is the product.",
@@ -24,14 +23,13 @@
     "them and left at a conservative 200000 otherwise. The router does not read",
     "this field at all today; it is recorded for your own use."
   ],
-
   "_sources": {
     "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
     "openai": "https://developers.openai.com/api/docs/pricing",
     "google": "https://ai.google.dev/gemini-api/docs/pricing",
-    "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"
+    "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
+    "moonshot": "https://platform.kimi.ai/docs/pricing/chat-k3 (and sibling chat-k26 / chat-k27-code pages)"
   },
-
   "_provider_wiring": [
     "The 'provider' field must match a Provider name in your ProviderPool:",
     "  anthropic -> AnthropicProvider()",
@@ -40,9 +38,9 @@
     "  google    -> OpenAICompatibleProvider(",
     "                 base_url='https://generativelanguage.googleapis.com/v1beta/openai',",
     "                 name='google')",
+    "  moonshot  -> OpenAICompatibleProvider(base_url='https://api.moonshot.ai', name='moonshot')",
     "Four providers is deliberate: cross-lab auditing needs somewhere to cross to."
   ],
-
   "_pricing_caveats": [
     "gemini-3.7-flash is at promotional pricing through 2026-12-31; the page",
     "  states it rises to $1.50 in / $7.50 out on 2027-01-01.",
@@ -53,9 +51,10 @@
     "Claude 4.7 and later use a newer tokenizer that produces roughly 30% more",
     "  tokens for the same text, so per-token price alone understates their",
     "  relative cost. Switchboard bills on observed token counts, so real runs",
-    "  reflect this; the est_*_tokens on a Task do not."
+    "  reflect this; the est_*_tokens on a Task do not.",
+    "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing Switchboard does not model.",
+    "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real."
   ],
-
   "models": [
     {
       "model_id": "claude-opus-5",
@@ -122,15 +121,14 @@
       "context_window": 200000,
       "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
       "capabilities": {
-        "reasoning": 0.70,
+        "reasoning": 0.7,
         "coding": 0.72,
-        "summarization": 0.80,
+        "summarization": 0.8,
         "extraction": 0.82,
         "creative": 0.68,
-        "audit": 0.70
+        "audit": 0.7
       }
     },
-
     {
       "model_id": "gpt-5.6-sol",
       "provider": "openai",
@@ -143,9 +141,9 @@
       "capabilities": {
         "reasoning": 0.94,
         "coding": 0.93,
-        "summarization": 0.90,
+        "summarization": 0.9,
         "extraction": 0.89,
-        "creative": 0.90,
+        "creative": 0.9,
         "audit": 0.93
       }
     },
@@ -171,8 +169,8 @@
       "model_id": "gpt-5.6-luna",
       "provider": "openai",
       "tier": "small",
-      "input_cost": 0.20,
-      "output_cost": 1.20,
+      "input_cost": 0.2,
+      "output_cost": 1.2,
       "latency": "fast",
       "context_window": 200000,
       "_source": "https://developers.openai.com/api/docs/pricing",
@@ -180,12 +178,11 @@
         "reasoning": 0.66,
         "coding": 0.68,
         "summarization": 0.78,
-        "extraction": 0.80,
+        "extraction": 0.8,
         "creative": 0.64,
         "audit": 0.66
       }
     },
-
     {
       "model_id": "gemini-3.1-pro-preview",
       "provider": "google",
@@ -198,9 +195,9 @@
       "_note": "Rate shown is the <=200k input tier; above 200k it is $4.00 in / $18.00 out.",
       "capabilities": {
         "reasoning": 0.92,
-        "coding": 0.90,
+        "coding": 0.9,
         "summarization": 0.91,
-        "extraction": 0.90,
+        "extraction": 0.9,
         "creative": 0.88,
         "audit": 0.91
       }
@@ -220,7 +217,7 @@
         "coding": 0.83,
         "summarization": 0.87,
         "extraction": 0.86,
-        "creative": 0.80,
+        "creative": 0.8,
         "audit": 0.84
       }
     },
@@ -228,22 +225,21 @@
       "model_id": "gemini-2.5-flash-lite",
       "provider": "google",
       "tier": "small",
-      "input_cost": 0.10,
-      "output_cost": 0.40,
+      "input_cost": 0.1,
+      "output_cost": 0.4,
       "latency": "fast",
       "context_window": 200000,
       "_source": "https://ai.google.dev/gemini-api/docs/pricing",
       "_note": "Text/image/video input rate; audio input is $0.30.",
       "capabilities": {
-        "reasoning": 0.60,
-        "coding": 0.60,
+        "reasoning": 0.6,
+        "coding": 0.6,
         "summarization": 0.76,
         "extraction": 0.79,
         "creative": 0.58,
-        "audit": 0.60
+        "audit": 0.6
       }
     },
-
     {
       "model_id": "deepseek-v4-pro",
       "provider": "deepseek",
@@ -280,6 +276,80 @@
         "extraction": 0.78,
         "creative": 0.62,
         "audit": 0.68
+      }
+    },
+    {
+      "model_id": "kimi-k3",
+      "provider": "moonshot",
+      "tier": "frontier",
+      "input_cost": 3.0,
+      "output_cost": 15.0,
+      "latency": "slow",
+      "context_window": 1000000,
+      "_source": "https://platform.kimi.ai/docs/pricing/chat-k3",
+      "capabilities": {
+        "reasoning": 0.92,
+        "coding": 0.92,
+        "summarization": 0.89,
+        "extraction": 0.88,
+        "creative": 0.88,
+        "audit": 0.91
+      }
+    },
+    {
+      "model_id": "kimi-k2.7-code",
+      "provider": "moonshot",
+      "tier": "mid",
+      "input_cost": 0.95,
+      "output_cost": 4.0,
+      "latency": "medium",
+      "context_window": 256000,
+      "_source": "https://platform.kimi.ai/docs/pricing/chat-k27-code",
+      "_note": "Coding specialist; scored above general mid models on coding only.",
+      "capabilities": {
+        "reasoning": 0.84,
+        "coding": 0.9,
+        "summarization": 0.83,
+        "extraction": 0.84,
+        "creative": 0.76,
+        "audit": 0.83
+      }
+    },
+    {
+      "model_id": "kimi-k2.7-code-highspeed",
+      "provider": "moonshot",
+      "tier": "mid",
+      "input_cost": 1.9,
+      "output_cost": 8.0,
+      "latency": "fast",
+      "context_window": 256000,
+      "_source": "https://platform.kimi.ai/docs/pricing/chat-k27-code",
+      "_note": "Identical capabilities to kimi-k2.7-code at 2x price for speed. The router should only pick it when latency is actually weighted.",
+      "capabilities": {
+        "reasoning": 0.84,
+        "coding": 0.9,
+        "summarization": 0.83,
+        "extraction": 0.84,
+        "creative": 0.76,
+        "audit": 0.83
+      }
+    },
+    {
+      "model_id": "kimi-k2.6",
+      "provider": "moonshot",
+      "tier": "mid",
+      "input_cost": 0.95,
+      "output_cost": 4.0,
+      "latency": "medium",
+      "context_window": 256000,
+      "_source": "https://platform.kimi.ai/docs/pricing/chat-k26",
+      "capabilities": {
+        "reasoning": 0.85,
+        "coding": 0.85,
+        "summarization": 0.85,
+        "extraction": 0.85,
+        "creative": 0.8,
+        "audit": 0.84
       }
     }
   ]

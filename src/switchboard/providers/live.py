@@ -55,6 +55,15 @@ KNOWN_PROVIDERS: dict[str, ProviderSpec] = {
         max_tokens_param="max_tokens",
         signup_url="https://aistudio.google.com/apikey",
     ),
+    "moonshot": ProviderSpec(
+        # Kimi. The vendor rebranded from moonshot.ai to kimi.ai, but the API
+        # host and the env var everyone's shell already exports both still say
+        # moonshot, so that is what the catalog keys on.
+        env_var="MOONSHOT_API_KEY",
+        base_url="https://api.moonshot.ai",
+        max_tokens_param="max_tokens",
+        signup_url="https://platform.kimi.ai/console/api-keys",
+    ),
 }
 
 
