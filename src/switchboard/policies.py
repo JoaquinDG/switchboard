@@ -83,6 +83,13 @@ class Policy:
     # pass rate suggests. Independence outranks both capability and price, so
     # this filter runs before auditor_selection.
     prefer_cross_lab_auditor: bool = True
+    # Triage: ask a model only when the heuristic's confidence falls below
+    # this. Measured on 40 labeled prompts, the heuristic's confidence is a
+    # clean separator of its own errors — every wrong classification scored
+    # exactly 0.00 while correct ones averaged 0.93 — so gating captures the
+    # model layer's accuracy on ~12% of the calls. Set to 0.0 to never ask a
+    # model, or above 1.0 to always ask.
+    triage_confidence_threshold: float = 0.25
     # How many times the broker may reroute to the next-ranked model when a
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.

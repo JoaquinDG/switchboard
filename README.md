@@ -7,7 +7,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 213 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 216 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -77,7 +77,27 @@ Moving up a tier is already the quality step. *Which* model in that tier is stil
 
 Measured on the same failing task: escalation moved from `claude-opus-5` ($25/M out) to `gemini-3.1-pro-preview` ($12/M out) under `balanced`, and reached **the same audit verdict, 0.68**. Suite generation cost fell from $0.024 to $0.003 — partly the cheaper rate, partly a more concise answer, so read it as a direction rather than a multiplier.
 
-### Finding 3: verification, not inference, dominates the bill
+### Finding 3: a policy sweep, and one preset that does not do what it says
+
+Same five tasks under each preset, five providers, 1200-token ceiling:
+
+| | cost_first | balanced | quality_first |
+|---|---|---|---|
+| Verified | 5/5 | 3/5 | 5/5 |
+| Generation, routed | $0.00325 | $0.00405 | $0.00460 |
+| Saved on generation | 92% | 93% | 75% |
+| Audit overhead | 94% | 92% | 91% |
+| **Total** | **$0.05116** | **$0.05088** | **$0.04937** |
+
+Two things fall out of that table.
+
+**Total spend barely moves.** Under a frontier auditor on small tasks, verification is ~92% of the bill and roughly constant, so the routing policy — the thing this entire library exists to make explicit — changes the total by about 4%. Routing dominates *generation* cost; verification dominates *total* cost. Both are true and they point in different directions.
+
+**`quality_first` routed to mid-tier models, not frontier.** Not a router bug — a scale bug in the weights. Cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. On this catalog capability spans 0.78-0.90 for extraction, so an 0.85 quality weight buys 0.102 of influence while an 0.10 latency weight buys 0.080. On `reasoning@0.6`, `claude-opus-5`'s 0.093 quality advantage loses to `gemini-3.7-flash`'s 0.080 latency advantage.
+
+The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis. The finding and the failed fix are both recorded in [ROADMAP.md](ROADMAP.md) item 1b rather than patched over.
+
+### Finding 4: verification, not inference, dominates the bill
 
 | | default auditor | `cheapest_qualified` |
 |---|---|---|
@@ -89,17 +109,17 @@ Measured on the same failing task: escalation moved from `claude-opus-5` ($25/M 
 
 On the summarization task the audit cost **188x the generation it graded**. The audit prompt carries the task, the output *and* the rubric, so it has a floor a small task cannot amortise. `auditor_selection="cheapest_qualified"` cut audit cost 90% and total spend 65%, reaching the same pass/fail on all five tasks — one needed an extra escalation to get there, because the cheap auditor was *stricter* on first pass. n=5; suggestive, not settled.
 
-### Finding 4: a listed model is not a working model
+### Finding 5: a listed model is not a working model
 
 `live_check.py` diffs the catalog against each vendor's `/models` endpoint for free. That is necessary and **not sufficient**: `gemini-2.5-flash-lite` was still listed and returned `404 no longer available` at the chat endpoint. Listing proves a name is known, not that it is served.
 
 `--probe` closes the gap by making one 16-token call per model. It distinguishes a retired model from a `429` (your quota, not a bad catalog entry), and it exposed a false negative in its own first version: a 1-token probe made OpenAI's reasoning models return `400 max_tokens reached`, which says nothing about whether they exist. Same lesson as Finding 1 — thinking tokens come out of the visible budget — arriving from the opposite direction.
 
-### Finding 5: cross-lab auditing caught real defects
+### Finding 6: cross-lab auditing caught real defects
 
 `claude-opus-5` flagged that a `median()` written by `deepseek-v4-flash` returned an `int` where its annotation promised `float`. Better: on the reasoning task, `gpt-5.6-sol` caught `claude-opus-5` **inventing per-token prices that were never in the prompt**. A same-lab audit is exactly where you would expect that to slide through.
 
-### Finding 6: unverified means unverified
+### Finding 7: unverified means unverified
 
 The one remaining failure scored 0.68 against a 0.70 threshold — a real quality judgment, not a mechanical one, and reproduced identically across runs. It was returned flagged rather than shipped.
 
@@ -176,7 +196,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 213 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 216 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -224,7 +244,28 @@ Two layers, in deliberate order. The **heuristic** is the default: weighted keyw
 
 **The rationale always names the layer that decided.** `(heuristic)` and `(model:claude-haiku-4-5-20251001)` are different claims, and a reviewer reading a trace is entitled to know which one they're looking at. When the model layer fails and the heuristic answers instead, `source` says `heuristic` — never the model that didn't work.
 
-### How good is it, honestly
+### Confidence-gated: measured, then shipped
+
+The heuristic's confidence turns out to separate its own errors perfectly. Across 40 labeled prompts run against live APIs (`examples/triage_ab.py`):
+
+| | n | mean confidence | max |
+|---|---|---|---|
+| Heuristic **correct** | 36 | 0.93 | 1.00 |
+| Heuristic **wrong** | 4 | **0.00** | **0.00** |
+
+Zero overlap. So gating on confidence beats either layer used alone:
+
+| Strategy | Accuracy | Held-out | Model calls | Cost |
+|---|---|---|---|---|
+| Heuristic only | 90% | 60% | 0 | free |
+| Model always | 95% | 90% | 40 | $0.00089 |
+| **Hybrid at 0.25** | **98%** | **90%** | **5** | $0.00011 |
+
+Asking a model on every prompt is *worse* than the hybrid — it overrides cases the heuristic already had right (it mislabelled "Debug this stack trace" and "What is wrong with this function?" as reasoning). Gating keeps the heuristic's wins, buys the model's wins on the 12% where the heuristic had no signal, and costs ~$0.00002 per classification.
+
+The real cost is latency, not money: ~1.6s per model classification, which is why calling it 5 times instead of 40 matters. `Policy.triage_confidence_threshold` defaults to 0.25; set it to 0.0 to never ask a model, above 1.0 to always.
+
+### How good is the heuristic alone, honestly
 
 `evals/triage_eval.py` scores 40 labeled prompts and reports two numbers separately, because only one of them means anything:
 
@@ -345,9 +386,9 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               213 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               216 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
-examples/            quickstart, agentic workflow, live_check + live_run, starter + template catalogs
+examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
 ```
 
 ## Changelog

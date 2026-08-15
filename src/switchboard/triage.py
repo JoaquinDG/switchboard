@@ -339,15 +339,28 @@ def triage_task(
 ) -> tuple[Task, Triage]:
     """Resolve a `task_type="auto"` Task into a concrete one.
 
+    The model layer, when enabled, is used only where the heuristic is
+    uncertain (see `Policy.triage_confidence_threshold`).
+
     Returns the resolved Task and the Triage that produced it. `complexity` is
     replaced too: a caller who did not know the task type cannot have known
     the complexity either, and leaving the 0.5 default in place would silently
     mix a real estimate with a placeholder.
     """
-    if use_model and registry is not None and providers is not None:
+    verdict = classify_heuristic(task.prompt)
+    threshold = getattr(policy, "triage_confidence_threshold", 0.25)
+    if (
+        use_model
+        and registry is not None
+        and providers is not None
+        and verdict.confidence < threshold
+    ):
+        # Confidence-gated, not all-or-nothing. The heuristic is free, instant,
+        # and right ~90% of the time; the model is better precisely where the
+        # heuristic matched nothing and fell through to its default. Asking a
+        # model on every prompt costs latency on the 88% the heuristic already
+        # had, and measurably *lowers* accuracy by overriding cases it got right.
         verdict = classify_with_model(task.prompt, registry, providers, policy)
-    else:
-        verdict = classify_heuristic(task.prompt)
     resolved = Task(
         prompt=task.prompt,
         task_type=verdict.task_type,

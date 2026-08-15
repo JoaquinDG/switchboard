@@ -34,6 +34,12 @@ These are the highest-value items because each one fixes something the repo curr
 - **Note:** generate real traces first with `examples/live_run.py --live`; `traces/` is gitignored, so a fresh checkout has none. Running the offline examples also produces traces, but their audit outcomes are canned and must not be scored.
 - **Trap:** do not auto-write scores back into the catalog from a handful of samples. Report the numbers *and the sample size*, and say plainly when `n` is too small to act on. A confidently wrong measured score is worse than an honestly labelled estimate.
 
+### 1b. Scoring terms are not on comparable scales
+- [ ] **Why it matters:** cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. Measured on the starter catalog for `extraction`: capability ranges 0.78-0.90 (spread 0.12, so an 0.85 weight buys 0.102 of influence) while latency spans 0.20-1.00 (spread 0.80, so an 0.10 weight buys 0.080). The weights do not mean what they say. Concretely, `quality_first` on `reasoning@0.6` picks `gemini-3.7-flash` (capability 0.84, fast) over `claude-opus-5` (0.95, slow): a 0.093 quality advantage loses to an 0.080 latency advantage. A policy named quality-first should not do that.
+- **Done looks like:** the weights behave as advertised, demonstrated on both the 3-model demo catalog and the 16-model starter catalog, with the routing evals still passing.
+- **Trap — this one has already been walked into.** The obvious fix is to min-max normalize capability the way cost is normalized. It works on a wide catalog and *breaks on a narrow one*: with three models spanning 0.78-0.88, normalizing turns a 0.10 capability difference into a full 0.0-to-1.0 swing, and `balanced` starts sending easy extraction to the frontier model. That is the same artifact already fixed for cost ("with two candidates one is always 0.0"), reintroduced on another axis. Capability is a genuinely absolute 0-1 quantity; its observed range in a given catalog is not a meaningful denominator.
+- **Other directions worth trying:** narrow the latency score spread (currently fast=1.0 / medium=0.6 / slow=0.2); normalize against the full 0-1 capability scale rather than the observed range; or leave scoring alone and recalibrate the preset weights, accepting that weights are catalog-dependent and saying so.
+
 ### 2. Context-window awareness in routing
 - [ ] **Why it matters:** `ModelSpec.context_window` is stored, validated, and **never read by the router** (verified: no reference outside `registry.py`). A task with 400k estimated input tokens can be routed today to a 200k model, which fails at the provider with a hard error rather than being caught as a routing constraint.
 - **Done looks like:** a hard gate — models whose context window cannot hold `est_input_tokens` plus `est_output_tokens` are ineligible, with the exclusion named in the rationale. Gate ordering and the degrade-upward rule must be preserved. Eval scenario covering it.
@@ -53,8 +59,9 @@ These are the highest-value items because each one fixes something the repo curr
 
 ## Tier 2 — extend the core mechanisms
 
-### 5. Confidence-gated triage
-- [ ] **Why it matters:** Triage is currently all-heuristic or all-model per Broker. But the heuristic already reports its own confidence, and the held-out eval shows its failures cluster exactly where confidence is `0.00` — prompts that matched no keyword and fell through to the `reasoning` default. Spending a cheap model call *only* on the uncertain cases targets the real weakness at a fraction of the cost.
+### 5. Confidence-gated triage — **DONE**
+- [x] Shipped as `Policy.triage_confidence_threshold` (default 0.25), measured by `examples/triage_ab.py`. Across 40 labeled prompts the heuristic's confidence separated its errors perfectly (every wrong answer scored 0.00, correct ones averaged 0.93), so gating reaches 98% accuracy on 5 model calls instead of 40 — better than either layer alone, since asking a model on every prompt overrides cases the heuristic got right.
+- **Original rationale:** Triage is currently all-heuristic or all-model per Broker. But the heuristic already reports its own confidence, and the held-out eval shows its failures cluster exactly where confidence is `0.00` — prompts that matched no keyword and fell through to the `reasoning` default. Spending a cheap model call *only* on the uncertain cases targets the real weakness at a fraction of the cost.
 - **Done looks like:** a policy threshold below which triage escalates from heuristic to model; a measurement of resulting accuracy and cost per classification; the rationale still naming which layer decided each time.
 - **Trap:** the honesty rule holds. A prompt classified by the heuristic must still say `heuristic`, even when the policy *would have* escalated but the model call failed.
 

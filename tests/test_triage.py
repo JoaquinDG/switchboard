@@ -18,6 +18,7 @@ from switchboard import (
     MockProvider,
     ProviderPool,
     ProviderUnavailable,
+    Policy,
     ScriptedProvider,
     Task,
     classify_heuristic,
@@ -292,12 +293,49 @@ class BrokerIntegrationTests(unittest.TestCase):
             self.assertIsNone(json.loads(trace.read_text().strip())["triage_source"])
 
     def test_model_triage_is_opt_in_at_the_broker(self):
+        # A prompt matching no keyword scores 0.00 confidence, which is what
+        # sends it to the model.
+        registry = demo_registry()
+        provider = ScriptedProvider(name="mock", default='{"task_type": "creative", "complexity": 0.8}')
+        broker = Broker(registry, ProviderPool([provider]), BALANCED, triage_use_model=True)
+        result = broker.run(Task(prompt="zzzz qqqq wwww", task_type="auto"))
+        self.assertEqual(result.triage.source, f"model:{CHEAPEST}")
+        self.assertIn(f"model:{CHEAPEST}", result.routing_rationale)
+
+    def test_confident_heuristic_does_not_pay_for_a_model_call(self):
+        # Measured: the heuristic is right 90% of the time and its confidence
+        # perfectly separates its errors. Asking a model anyway buys latency
+        # and, on the tuned set, slightly *worse* accuracy.
         registry = demo_registry()
         provider = ScriptedProvider(name="mock", default='{"task_type": "creative", "complexity": 0.8}')
         broker = Broker(registry, ProviderPool([provider]), BALANCED, triage_use_model=True)
         result = broker.run(Task(prompt="Refactor this module.", task_type="auto"))
-        self.assertEqual(result.triage.source, f"model:{CHEAPEST}")
-        self.assertIn(f"model:{CHEAPEST}", result.routing_rationale)
+        self.assertEqual(result.triage.source, "heuristic")
+        self.assertEqual(result.triage.task_type, "coding")
+        # calls still contains the generation and audit; what must be absent
+        # is a *triage* call, identified by the classifier prompt.
+        self.assertEqual([p for _, p in provider.calls if "Classify this task" in p], [])
+
+    def test_threshold_above_one_always_asks_the_model(self):
+        registry = demo_registry()
+        policy = Policy("always", 0.5, 0.3, 0.2, triage_confidence_threshold=1.01)
+        provider = ScriptedProvider(name="mock", default='{"task_type": "creative", "complexity": 0.8}')
+        _, verdict = triage_task(
+            Task(prompt="Refactor this module.", task_type="auto"),
+            registry, ProviderPool([provider]), policy, use_model=True,
+        )
+        self.assertEqual(verdict.source, f"model:{CHEAPEST}")
+
+    def test_threshold_zero_never_asks_the_model(self):
+        registry = demo_registry()
+        policy = Policy("never", 0.5, 0.3, 0.2, triage_confidence_threshold=0.0)
+        provider = ScriptedProvider(name="mock", default='{"task_type": "creative", "complexity": 0.8}')
+        _, verdict = triage_task(
+            Task(prompt="zzzz qqqq", task_type="auto"),
+            registry, ProviderPool([provider]), policy, use_model=True,
+        )
+        self.assertEqual(verdict.source, "heuristic")
+        self.assertEqual(provider.calls, [])
 
 
 if __name__ == "__main__":
