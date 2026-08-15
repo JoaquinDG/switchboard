@@ -217,10 +217,15 @@ Queue entries are strings (returned) or exceptions (raised); the last entry repe
 
 ## Roadmap
 
-- Trace-driven catalog updates: recompute capability scores from audit outcomes in `traces/*.jsonl`
-- Budget-aware policies (monthly spend caps that shift weights as budget depletes)
-- Async + batching in the provider layer
-- Triage: close the held-out gap, either with a better feature set or by making the model layer the default once its cost is measured
+Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)**. The highest-value items are the ones that fix something the repo currently gets wrong rather than something it merely lacks:
+
+- **Trace-driven catalog feedback** — replace the starter catalog's *estimated* capability scores with pass-rates measured from `traces/*.jsonl`. The weakest claim in the repo, and the data is already being recorded.
+- **Context-window awareness** — `ModelSpec.context_window` is stored, validated, and never read by the router. A task larger than a model's window can be routed to it today.
+- **Tokenizer-aware cost** — the catalog notes that Claude 4.7+ produce ~30% more tokens for the same text, so comparing vendors on per-token price alone is biased.
+- **Batch-API pricing** — a ~50% discount the router cannot currently see.
+- **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
+
+Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
 
 ## Repo map
 
@@ -234,6 +239,7 @@ src/switchboard/
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
+ROADMAP.md           the working backlog: what to build next and how not to fake it
 tests/               186 tests (router, gates, triage, auditor, cross-lab, costs, resilience, catalog)
 evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
 examples/            quickstart, agentic workflow (--catalog), starter + template catalogs

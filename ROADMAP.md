@@ -1,0 +1,119 @@
+# Roadmap
+
+The working backlog, in priority order. **This file is the single source of truth** — the scheduled maintenance agent reads it and takes the first unchecked item, so editing this file is how you steer what gets built next.
+
+Reorder freely. Add items freely. Tick a box when the work lands on `main`.
+
+## How to read an item
+
+Each entry states **why it matters** (the gap it closes), **done looks like** (acceptance criteria), and where relevant a **trap** — a way of satisfying the letter of the item while making the repo worse. The traps are the important part. Most of these items have an easy wrong version.
+
+## Ground rules for every item
+
+These are not negotiable and apply to all work below:
+
+- Zero runtime dependencies; the package stays stdlib-only and runs fully offline via `MockProvider`.
+- `unittest discover`, `routing_eval.py`, and `triage_eval.py` all pass before anything opens for review.
+- Honest claims only. Estimated is never presented as measured; mocked is never presented as real.
+- New routing logic extends the rationale string and the ranked list. It never bypasses them.
+- One logical change per PR.
+
+---
+
+## Tier 1 — close known gaps in what already exists
+
+These are the highest-value items because each one fixes something the repo currently gets *wrong or unmeasured*, not something it merely lacks.
+
+### 1. Trace-driven catalog feedback
+- [ ] **Why it matters:** The starter catalog's capability scores are estimates, and the file says so in block capitals. That is the weakest claim in the repo and the first thing a reviewer will poke at. Traces already record audit outcomes per model per task type — the measurement is sitting there unused.
+- **Done looks like:** a script in `evals/` that reads `traces/*.jsonl` and reports observed audit pass-rate and mean audit score, per model, per task type, with sample counts. Plus a documented path from that report to updated catalog numbers.
+- **Trap:** do not auto-write scores back into the catalog from a handful of samples. Report the numbers *and the sample size*, and say plainly when `n` is too small to act on. A confidently wrong measured score is worse than an honestly labelled estimate.
+
+### 2. Context-window awareness in routing
+- [ ] **Why it matters:** `ModelSpec.context_window` is stored, validated, and **never read by the router** (verified: no reference outside `registry.py`). A task with 400k estimated input tokens can be routed today to a 200k model, which fails at the provider with a hard error rather than being caught as a routing constraint.
+- **Done looks like:** a hard gate — models whose context window cannot hold `est_input_tokens` plus `est_output_tokens` are ineligible, with the exclusion named in the rationale. Gate ordering and the degrade-upward rule must be preserved. Eval scenario covering it.
+- **Trap:** this is a *gate*, not a score. Do not add "context headroom" as a weighted term; a model that cannot fit the input is not a worse choice, it is not a choice.
+
+### 3. Tokenizer-aware cost comparison
+- [ ] **Why it matters:** `examples/starter_catalog.json` already documents that Claude 4.7 and later use a tokenizer producing roughly 30% more tokens for the same text. Per-token price therefore understates their real cost, and the router compares vendors on price alone. Cross-vendor cost comparison is currently biased.
+- **Done looks like:** an optional per-model `token_multiplier` (default 1.0) applied in `estimate_cost`, populated for the models the catalog flags, documented as an estimate. Actual billing still uses observed tokens and must not be double-counted.
+- **Trap:** `actual_cost` operates on token counts the provider already reported. Applying the multiplier there would inflate real bills. It belongs in the *estimate* path only.
+
+### 4. Batch-API pricing
+- [ ] **Why it matters:** Vendors offer ~50% off for asynchronous batch processing — the single largest discount available, and the router cannot see it. A brokerage that ignores the biggest cost lever in the market is incomplete.
+- **Done looks like:** a `Task` flag for latency-insensitive work, a catalog field for the batch discount, and routing that prices eligible tasks at the batch rate. `needs_fast_response` and batch eligibility are mutually exclusive; enforce that.
+- **Trap:** do not claim batch *execution* support. This is pricing-model work. Actually submitting to batch endpoints is a separate, larger item — say so rather than implying it works.
+
+---
+
+## Tier 2 — extend the core mechanisms
+
+### 5. Confidence-gated triage
+- [ ] **Why it matters:** Triage is currently all-heuristic or all-model per Broker. But the heuristic already reports its own confidence, and the held-out eval shows its failures cluster exactly where confidence is `0.00` — prompts that matched no keyword and fell through to the `reasoning` default. Spending a cheap model call *only* on the uncertain cases targets the real weakness at a fraction of the cost.
+- **Done looks like:** a policy threshold below which triage escalates from heuristic to model; a measurement of resulting accuracy and cost per classification; the rationale still naming which layer decided each time.
+- **Trap:** the honesty rule holds. A prompt classified by the heuristic must still say `heuristic`, even when the policy *would have* escalated but the model call failed.
+
+### 6. Budget-aware policy
+- [ ] **Why it matters:** Policies are static, but budgets are not. A team three weeks into a monthly cap wants different weights from one on day one, and today that means editing code mid-month.
+- **Done looks like:** a policy that reads cumulative spend from traces and shifts cost weight as the cap approaches, with the current budget position visible in the rationale.
+- **Trap:** it must degrade gracefully to a normal policy when no trace history exists. A cold start must not behave like an exhausted budget.
+
+### 7. Multi-auditor consensus for high-stakes tasks
+- [ ] **Why it matters:** One auditor is one opinion. For high-complexity or explicitly flagged work, N independent auditors and a majority verdict is meaningfully stronger evidence — and the cross-lab machinery to pick genuinely independent auditors already exists.
+- **Done looks like:** a policy knob for auditor count, verdicts aggregated by majority with disagreement recorded rather than averaged away, and the extra cost reported in the existing cost accounting.
+- **Trap:** disagreement is signal. Do not collapse a 2–1 split into a clean pass; the split is exactly what a reviewer needs to see.
+
+### 8. Shadow routing / policy A-B
+- [ ] **Why it matters:** The README argues these traces are the training data for a future learned router. Today they only record the road taken. Logging what a *second* policy would have chosen — without executing it — produces comparison data at zero extra inference cost.
+- **Done looks like:** an optional shadow policy on the Broker; both decisions in the trace; a small report comparing chosen vs shadow cost and outcomes.
+- **Trap:** the shadow must never execute, never audit, and never affect the real decision. Zero added spend is the entire point.
+
+---
+
+## Tier 3 — infrastructure and fidelity
+
+### 9. Prompt-cache-aware costing
+- [ ] **Why it matters:** Cache reads cost ~10% of standard input on major vendors, and the starter catalog already notes it is quoting cache-miss rates. Agentic workloads re-send large stable prefixes constantly, so the modelled cost of exactly the workload this library targets is systematically too high.
+- **Done looks like:** optional cache-hit-rate assumptions per task, applied in estimation, clearly labelled as assumptions rather than observations.
+- **Trap:** an assumed cache hit rate is an input, not a measurement. Never let it appear in a "measured cost" field.
+
+### 10. Async provider layer
+- [ ] **Why it matters:** Every call is blocking. A five-step pipeline with independent steps runs strictly serially, and audits serialise behind generation.
+- **Done looks like:** `asyncio` variants of Provider and Broker, the existing sync API unchanged and still tested, no new dependencies.
+- **Trap:** do not fork the codebase into two half-maintained paths. Share the routing, auditing, and accounting logic.
+
+### 11. Measured latency classes
+- [ ] **Why it matters:** `fast` / `medium` / `slow` are assigned by tier and never measured, yet latency is a full third of the `balanced` policy weighting. One of three routing inputs is currently a guess.
+- **Done looks like:** wall-clock timing recorded per attempt in traces, and a report of observed p50/p95 per model to inform the catalog's latency classes.
+- **Trap:** mock timings are meaningless. The report must state whether the traces came from real providers, and refuse to draw conclusions from mock runs.
+
+### 12. Hard capability flags
+- [ ] **Why it matters:** Capabilities are all soft 0–1 scores, but some requirements are binary: JSON mode, tool use, vision, a minimum context. A model either supports structured output or it does not, and no amount of cheapness compensates.
+- **Done looks like:** optional boolean feature flags on `ModelSpec`, requestable per Task, enforced as a gate with the exclusion explained in the rationale.
+- **Trap:** flags are gates. Resist folding them into the weighted score.
+
+---
+
+## Tier 4 — explainability polish
+
+### 13. Counterfactual "why not X?" explainer
+- [ ] **Why it matters:** The rationale explains why the winner won. The question people actually ask is why their preferred model lost, and the ranked list holds every number needed to answer it.
+- **Done looks like:** a function taking a decision and a model id, returning the specific losing margin by component — "lost on cost: 0.31 vs 0.88, worth 0.17 under this policy".
+- **Trap:** compute it from the existing ranked list. Do not re-run routing.
+
+### 14. Close the triage held-out gap
+- [ ] **Why it matters:** Triage scores 100% on its tuned set and 60% held out. The gap is honestly reported, but 60% is still the real number.
+- **Done looks like:** a genuine generalisation improvement, *or* a measured recommendation to default to the model-based layer, backed by accuracy and cost numbers.
+- **Trap:** **do not add keywords that make the held-out prompts pass.** There is a comment in `evals/triage_eval.py` saying exactly this. Tuning against the held-out set destroys the only honest measurement in the repository and converts a real result into a decorative one. If the set ever becomes tuned, it must be relabelled as tuned.
+
+---
+
+## When this list is empty
+
+Do not invent work. No refactors for their own sake, no speculative abstractions, no README inflation. Run the maintenance pass instead:
+
+- Re-check every price in `examples/starter_catalog.json` against the `_source` URL on that entry; update values and `_last_verified` if they moved, and call out each change.
+- Verify README claims still match reality: test counts, eval percentages, captured example output.
+- If everything is accurate and nothing above is unchecked, open an issue describing the repo's state and what you would suggest next, and stop.
+
+An empty run is a good outcome. Padding the log is not.
