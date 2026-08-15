@@ -1,9 +1,6 @@
-<!-- CI badge: paste your GitHub owner in place of OWNER once this is pushed.
-     [![CI](https://github.com/OWNER/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/switchboard/actions/workflows/ci.yml)
-     Left commented out deliberately — a badge pointing at a repo that does not
-     exist yet renders as a broken image, which is worse than no badge. -->
-
 # Switchboard
+
+[![CI](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml)
 
 **An LLM model brokerage: route every task to the most efficient model, let models audit each other, and account for what it cost.**
 
