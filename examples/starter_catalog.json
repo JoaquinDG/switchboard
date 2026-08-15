@@ -1,0 +1,286 @@
+{
+  "_last_verified": "2026-08-15",
+
+  "_disclaimer": [
+    "READ THIS BEFORE TRUSTING ANY NUMBER IN THIS FILE.",
+    "",
+    "PRICES are real. Every input_cost/output_cost below was read from the",
+    "vendor's own pricing page on the _last_verified date, and each model",
+    "carries the URL it came from in its _source field. They are still only",
+    "true as of that date: vendors change prices and retire models, and",
+    "Registry.from_json warns once this file is more than 60 days old.",
+    "",
+    "CAPABILITY SCORES ARE ESTIMATES. They are one engineer's priors about",
+    "relative model strength, not measurements. No benchmark was run to",
+    "produce them and none is implied. They are here so the catalog loads and",
+    "routes out of the box — replace them with numbers from your own evals on",
+    "your own traffic before using this to make real routing decisions. The",
+    "router is only as good as this field, which is why the README says the",
+    "catalog is the product.",
+    "",
+    "LATENCY CLASSES are also estimates, assigned by tier rather than measured.",
+    "",
+    "CONTEXT WINDOWS are set from vendor docs where the pricing page stated",
+    "them and left at a conservative 200000 otherwise. The router does not read",
+    "this field at all today; it is recorded for your own use."
+  ],
+
+  "_sources": {
+    "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "openai": "https://developers.openai.com/api/docs/pricing",
+    "google": "https://ai.google.dev/gemini-api/docs/pricing",
+    "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"
+  },
+
+  "_provider_wiring": [
+    "The 'provider' field must match a Provider name in your ProviderPool:",
+    "  anthropic -> AnthropicProvider()",
+    "  openai    -> OpenAICompatibleProvider()",
+    "  deepseek  -> OpenAICompatibleProvider(base_url='https://api.deepseek.com', name='deepseek')",
+    "  google    -> OpenAICompatibleProvider(",
+    "                 base_url='https://generativelanguage.googleapis.com/v1beta/openai',",
+    "                 name='google')",
+    "Four providers is deliberate: cross-lab auditing needs somewhere to cross to."
+  ],
+
+  "_pricing_caveats": [
+    "gemini-3.7-flash is at promotional pricing through 2026-12-31; the page",
+    "  states it rises to $1.50 in / $7.50 out on 2027-01-01.",
+    "gemini-3.1-pro-preview is priced in tiers; the rate here is the <=200k",
+    "  input tier. Above 200k it is $4.00 in / $18.00 out.",
+    "DeepSeek's page notes dynamic peak/off-peak pricing starting 2026-08-16 --",
+    "  one day after this file was verified. Re-check before relying on it.",
+    "Claude 4.7 and later use a newer tokenizer that produces roughly 30% more",
+    "  tokens for the same text, so per-token price alone understates their",
+    "  relative cost. Switchboard bills on observed token counts, so real runs",
+    "  reflect this; the est_*_tokens on a Task do not."
+  ],
+
+  "models": [
+    {
+      "model_id": "claude-opus-5",
+      "provider": "anthropic",
+      "tier": "frontier",
+      "input_cost": 5.0,
+      "output_cost": 25.0,
+      "latency": "slow",
+      "context_window": 1000000,
+      "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "capabilities": {
+        "reasoning": 0.95,
+        "coding": 0.95,
+        "summarization": 0.91,
+        "extraction": 0.89,
+        "creative": 0.92,
+        "audit": 0.95
+      }
+    },
+    {
+      "model_id": "claude-fable-5",
+      "provider": "anthropic",
+      "tier": "frontier",
+      "input_cost": 10.0,
+      "output_cost": 50.0,
+      "latency": "slow",
+      "context_window": 1000000,
+      "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "_note": "Priciest entry in the catalog; included so cost normalization has a real ceiling.",
+      "capabilities": {
+        "reasoning": 0.94,
+        "coding": 0.92,
+        "summarization": 0.92,
+        "extraction": 0.88,
+        "creative": 0.96,
+        "audit": 0.94
+      }
+    },
+    {
+      "model_id": "claude-sonnet-5",
+      "provider": "anthropic",
+      "tier": "mid",
+      "input_cost": 2.0,
+      "output_cost": 10.0,
+      "latency": "medium",
+      "context_window": 1000000,
+      "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "capabilities": {
+        "reasoning": 0.87,
+        "coding": 0.89,
+        "summarization": 0.88,
+        "extraction": 0.86,
+        "creative": 0.85,
+        "audit": 0.87
+      }
+    },
+    {
+      "model_id": "claude-haiku-4-5-20251001",
+      "provider": "anthropic",
+      "tier": "small",
+      "input_cost": 1.0,
+      "output_cost": 5.0,
+      "latency": "fast",
+      "context_window": 200000,
+      "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "capabilities": {
+        "reasoning": 0.70,
+        "coding": 0.72,
+        "summarization": 0.80,
+        "extraction": 0.82,
+        "creative": 0.68,
+        "audit": 0.70
+      }
+    },
+
+    {
+      "model_id": "gpt-5.6-sol",
+      "provider": "openai",
+      "tier": "frontier",
+      "input_cost": 5.0,
+      "output_cost": 30.0,
+      "latency": "slow",
+      "context_window": 200000,
+      "_source": "https://developers.openai.com/api/docs/pricing",
+      "capabilities": {
+        "reasoning": 0.94,
+        "coding": 0.93,
+        "summarization": 0.90,
+        "extraction": 0.89,
+        "creative": 0.90,
+        "audit": 0.93
+      }
+    },
+    {
+      "model_id": "gpt-5.6-terra",
+      "provider": "openai",
+      "tier": "mid",
+      "input_cost": 2.0,
+      "output_cost": 12.0,
+      "latency": "medium",
+      "context_window": 200000,
+      "_source": "https://developers.openai.com/api/docs/pricing",
+      "capabilities": {
+        "reasoning": 0.86,
+        "coding": 0.86,
+        "summarization": 0.86,
+        "extraction": 0.85,
+        "creative": 0.83,
+        "audit": 0.85
+      }
+    },
+    {
+      "model_id": "gpt-5.6-luna",
+      "provider": "openai",
+      "tier": "small",
+      "input_cost": 0.20,
+      "output_cost": 1.20,
+      "latency": "fast",
+      "context_window": 200000,
+      "_source": "https://developers.openai.com/api/docs/pricing",
+      "capabilities": {
+        "reasoning": 0.66,
+        "coding": 0.68,
+        "summarization": 0.78,
+        "extraction": 0.80,
+        "creative": 0.64,
+        "audit": 0.66
+      }
+    },
+
+    {
+      "model_id": "gemini-3.1-pro-preview",
+      "provider": "google",
+      "tier": "frontier",
+      "input_cost": 2.0,
+      "output_cost": 12.0,
+      "latency": "slow",
+      "context_window": 200000,
+      "_source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "_note": "Rate shown is the <=200k input tier; above 200k it is $4.00 in / $18.00 out.",
+      "capabilities": {
+        "reasoning": 0.92,
+        "coding": 0.90,
+        "summarization": 0.91,
+        "extraction": 0.90,
+        "creative": 0.88,
+        "audit": 0.91
+      }
+    },
+    {
+      "model_id": "gemini-3.7-flash",
+      "provider": "google",
+      "tier": "mid",
+      "input_cost": 0.75,
+      "output_cost": 3.75,
+      "latency": "fast",
+      "context_window": 200000,
+      "_source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "_note": "Promotional pricing through 2026-12-31; rises to $1.50 in / $7.50 out on 2027-01-01.",
+      "capabilities": {
+        "reasoning": 0.84,
+        "coding": 0.83,
+        "summarization": 0.87,
+        "extraction": 0.86,
+        "creative": 0.80,
+        "audit": 0.84
+      }
+    },
+    {
+      "model_id": "gemini-2.5-flash-lite",
+      "provider": "google",
+      "tier": "small",
+      "input_cost": 0.10,
+      "output_cost": 0.40,
+      "latency": "fast",
+      "context_window": 200000,
+      "_source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "_note": "Text/image/video input rate; audio input is $0.30.",
+      "capabilities": {
+        "reasoning": 0.60,
+        "coding": 0.60,
+        "summarization": 0.76,
+        "extraction": 0.79,
+        "creative": 0.58,
+        "audit": 0.60
+      }
+    },
+
+    {
+      "model_id": "DeepSeek-V4-Pro-0813",
+      "provider": "deepseek",
+      "tier": "mid",
+      "input_cost": 0.435,
+      "output_cost": 0.87,
+      "latency": "medium",
+      "context_window": 1000000,
+      "_source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "_note": "Cache-miss input rate. Cache hits are cheaper; Switchboard does not model caching.",
+      "capabilities": {
+        "reasoning": 0.85,
+        "coding": 0.87,
+        "summarization": 0.82,
+        "extraction": 0.83,
+        "creative": 0.76,
+        "audit": 0.83
+      }
+    },
+    {
+      "model_id": "DeepSeek-V4-Flash-0731",
+      "provider": "deepseek",
+      "tier": "small",
+      "input_cost": 0.14,
+      "output_cost": 0.28,
+      "latency": "fast",
+      "context_window": 1000000,
+      "_source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "_note": "Cache-miss input rate.",
+      "capabilities": {
+        "reasoning": 0.68,
+        "coding": 0.72,
+        "summarization": 0.76,
+        "extraction": 0.78,
+        "creative": 0.62,
+        "audit": 0.68
+      }
+    }
+  ]
+}

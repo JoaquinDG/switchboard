@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor declared in pyproject; 3.13 is the ceiling we
+        # actually exercise. Everything in between runs because the suite
+        # takes well under a second and a version-specific break is exactly
+        # the kind of thing a zero-dependency package should catch itself.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Zero dependencies is a feature: no install step, nothing to pin, and
+      # no network or secrets needed anywhere in this workflow.
+      - name: Unit tests
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+
+      # Called out separately from the rest of the suite because the shipped
+      # catalogs are the files most likely to rot: prices change, models are
+      # retired, and hand-edited JSON has no compiler.
+      - name: Catalog validation
+        run: PYTHONPATH=src python -m unittest tests.test_catalog -v
+
+      # Scenario evals encode product expectations rather than unit behaviour,
+      # and they have caught routing regressions the unit tests missed. They
+      # gate merges for the same reason the tests do.
+      - name: Routing evals
+        run: PYTHONPATH=src python evals/routing_eval.py
+
+      - name: Triage evals
+        run: PYTHONPATH=src python evals/triage_eval.py
+
+      - name: Examples run offline
+        run: |
+          PYTHONPATH=src python examples/quickstart.py
+          PYTHONPATH=src python examples/agentic_workflow.py
+          PYTHONPATH=src python examples/agentic_workflow.py --catalog examples/starter_catalog.json
+
+      - name: Package builds
+        run: |
+          python -m pip install --upgrade build
+          python -m build

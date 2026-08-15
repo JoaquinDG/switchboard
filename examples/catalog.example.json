@@ -1,0 +1,56 @@
+{
+  "_comment": "Example catalog for real use. Model ids, costs (USD per 1M tokens), and capability scores are YOURS to maintain — check current vendor pricing pages and run your own capability evals rather than trusting defaults. The 'provider' field must match a Provider name in your ProviderPool.",
+  "models": [
+    {
+      "model_id": "your-frontier-model-id",
+      "provider": "anthropic",
+      "tier": "frontier",
+      "input_cost": 3.0,
+      "output_cost": 15.0,
+      "latency": "slow",
+      "context_window": 200000,
+      "capabilities": {
+        "reasoning": 0.95,
+        "coding": 0.93,
+        "summarization": 0.9,
+        "extraction": 0.88,
+        "creative": 0.9,
+        "audit": 0.95
+      }
+    },
+    {
+      "model_id": "your-fast-cheap-model-id",
+      "provider": "anthropic",
+      "tier": "small",
+      "input_cost": 0.8,
+      "output_cost": 4.0,
+      "latency": "fast",
+      "context_window": 200000,
+      "capabilities": {
+        "reasoning": 0.7,
+        "coding": 0.72,
+        "summarization": 0.8,
+        "extraction": 0.82,
+        "creative": 0.65,
+        "audit": 0.6
+      }
+    },
+    {
+      "model_id": "your-openai-compatible-model-id",
+      "provider": "openai",
+      "tier": "mid",
+      "input_cost": 1.0,
+      "output_cost": 5.0,
+      "latency": "medium",
+      "context_window": 128000,
+      "capabilities": {
+        "reasoning": 0.82,
+        "coding": 0.84,
+        "summarization": 0.85,
+        "extraction": 0.84,
+        "creative": 0.8,
+        "audit": 0.78
+      }
+    }
+  ]
+}
