@@ -24,8 +24,49 @@ import argparse
 import difflib
 import sys
 
-from switchboard import Registry, demo_registry
+from switchboard import (
+    ProviderConfigError,
+    ProviderError,
+    ProviderRateLimited,
+    Registry,
+    demo_registry,
+)
 from switchboard.providers.live import KNOWN_PROVIDERS, build_provider, key_status
+
+
+# Reasoning models spend thinking tokens from the same budget, so a 1-token
+# probe cannot produce output. OpenAI rejects that with a 400 outright while
+# Anthropic returns a truncated 200 — either way it says nothing about whether
+# the model exists. Small, but not that small.
+PROBE_MAX_TOKENS = 16
+
+
+def probe(provider, model_id: str) -> tuple[bool, str]:
+    """Actually call a model once, minimally. Returns (usable, explanation).
+
+    Listing is free but not sufficient: a vendor can keep a retired model in
+    `/models` and still refuse it at the chat endpoint (observed with
+    gemini-2.5-flash-lite, listed and 404 "no longer available"). Only a real
+    call distinguishes "exists" from "works".
+
+    A 429 is deliberately NOT treated as broken — that is your account quota,
+    not a bad catalog entry.
+    """
+    provider.max_retries = 0  # a probe should report, not sit through backoff
+    try:
+        provider.complete(model_id, "Hi", max_tokens=PROBE_MAX_TOKENS)
+        return True, "usable"
+    except ProviderRateLimited:
+        return True, "rate-limited (quota, not a catalog problem)"
+    except ProviderConfigError as e:
+        return False, f"auth/config: {e}"
+    except ProviderError as e:
+        message = str(e)
+        if "max_tokens" in message or "output limit" in message:
+            # The ceiling was too low for this model to say anything. That is a
+            # fact about the probe, not about the catalog.
+            return True, "usable (needs more than a token budget to respond)"
+        return False, message[:120]
 
 
 def main() -> int:
@@ -36,6 +77,12 @@ def main() -> int:
     parser.add_argument(
         "--show-available", action="store_true",
         help="also print every model id each key can reach",
+    )
+    parser.add_argument(
+        "--probe", action="store_true",
+        help="make one 1-token call per model to prove it actually works. "
+             "Listing alone cannot catch a retired model that is still listed. "
+             "COSTS A FRACTION OF A CENT.",
     )
     args = parser.parse_args()
 
@@ -69,20 +116,34 @@ def main() -> int:
             continue
 
         try:
-            available = set(build_provider(name).list_models())
+            raw = build_provider(name).list_models()
+            # Google returns resource names ("models/gemini-3.7-flash") while
+            # catalogs and the chat endpoint use the bare id. Comparing the two
+            # forms literally marked every Google model unreachable — a false
+            # positive that would have sent someone editing a correct catalog.
+            available = {m for m in raw} | {m.split("/", 1)[-1] for m in raw}
         except Exception as e:  # noqa: BLE001 - report and continue to the next vendor
             print(f"\n{name}: could not list models ({type(e).__name__}: {e})")
             unverified += len(catalog_ids)
             continue
 
-        print(f"\n{name}: {len(available)} model(s) reachable")
+        print(f"\n{name}: {len(raw)} model(s) reachable")
         if args.show_available:
             for model_id in sorted(available):
                 print(f"    - {model_id}")
 
+        prober = build_provider(name) if args.probe else None
         for model_id in catalog_ids:
             if model_id in available:
-                print(f"  [ OK ] {model_id}")
+                if prober is None:
+                    print(f"  [ OK ] {model_id}  (listed; not probed)")
+                else:
+                    ok, why = probe(prober, model_id)
+                    if ok:
+                        print(f"  [ OK ] {model_id}  ({why})")
+                    else:
+                        problems += 1
+                        print(f"  [FAIL] {model_id}  listed but NOT usable -- {why}")
             else:
                 problems += 1
                 close = difflib.get_close_matches(model_id, sorted(available), n=3, cutoff=0.5)
@@ -93,8 +154,11 @@ def main() -> int:
     if problems:
         print(f"{problems} catalog model id(s) do not exist on the vendor's API.")
         print("Fix them before running anything live — each one is a guaranteed 404.")
+    elif args.probe:
+        print("Every catalog model id resolves AND answered a real call.")
     else:
-        print("Every verifiable catalog model id resolves.")
+        print("Every verifiable catalog model id is listed by its vendor.")
+        print("Listing is not proof it works — re-run with --probe to actually call each one.")
     if unverified:
         print(f"{unverified} model(s) could not be checked (missing key or unknown provider).")
         print("Unchecked is not the same as correct.")

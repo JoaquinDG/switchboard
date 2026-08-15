@@ -53,7 +53,8 @@
     "  relative cost. Switchboard bills on observed token counts, so real runs",
     "  reflect this; the est_*_tokens on a Task do not.",
     "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing Switchboard does not model.",
-    "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real."
+    "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real.",
+    "A vendor listing a model in /models does not mean the chat endpoint accepts it. Verify with live_check.py --probe, which makes one 1-token call per model."
   ],
   "models": [
     {
@@ -222,22 +223,22 @@
       }
     },
     {
-      "model_id": "gemini-2.5-flash-lite",
+      "model_id": "gemini-3.1-flash-lite",
       "provider": "google",
       "tier": "small",
-      "input_cost": 0.1,
-      "output_cost": 0.4,
+      "input_cost": 0.25,
+      "output_cost": 1.5,
       "latency": "fast",
       "context_window": 200000,
       "_source": "https://ai.google.dev/gemini-api/docs/pricing",
-      "_note": "Text/image/video input rate; audio input is $0.30.",
+      "_note": "Text/image/video input rate; audio input is $0.50. Replaced gemini-2.5-flash-lite, which is still listed by /models but returns 404 'no longer available' at the chat endpoint -- caught by live_check.py --probe on 2026-08-15.",
       "capabilities": {
-        "reasoning": 0.6,
-        "coding": 0.6,
-        "summarization": 0.76,
-        "extraction": 0.79,
-        "creative": 0.58,
-        "audit": 0.6
+        "reasoning": 0.63,
+        "coding": 0.63,
+        "summarization": 0.78,
+        "extraction": 0.8,
+        "creative": 0.6,
+        "audit": 0.63
       }
     },
     {

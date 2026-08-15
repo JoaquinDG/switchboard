@@ -54,7 +54,7 @@ The same pipeline on the synthetic demo catalog (`--catalog` omitted) routes to 
 
 ## What happened when it ran for real
 
-On 2026-08-15 the suite in `examples/live_run.py` ran against **Anthropic, OpenAI, DeepSeek and Kimi** — three runs, fifteen real cross-lab audits, **$0.16 total**. Every number below is measured, not modelled.
+On 2026-08-15 the suite in `examples/live_run.py` ran against **all five providers — Anthropic, OpenAI, Google, DeepSeek and Kimi** — four runs, twenty real cross-lab audits, **$0.24 total**. Every catalog id was verified by a real call first. Every number below is measured, not modelled.
 
 ### Finding 1: the token ceiling was manufacturing fake quality failures
 
@@ -81,13 +81,21 @@ The adapter had been discarding `stop_reason` entirely, so a mechanical failure 
 
 On the summarization task the audit cost **188x the generation it graded**. The audit prompt carries the task, the output *and* the rubric, so it has a floor a small task cannot amortise. `auditor_selection="cheapest_qualified"` cut audit cost 90% and total spend 65%, reaching the same pass/fail on all five tasks — one needed an extra escalation to get there, because the cheap auditor was *stricter* on first pass. n=5; suggestive, not settled.
 
-### Finding 3: cross-lab auditing caught real defects
+### Finding 3: a listed model is not a working model
+
+`live_check.py` diffs the catalog against each vendor's `/models` endpoint for free. That is necessary and **not sufficient**: `gemini-2.5-flash-lite` was still listed and returned `404 no longer available` at the chat endpoint. Listing proves a name is known, not that it is served.
+
+`--probe` closes the gap by making one 16-token call per model. It distinguishes a retired model from a `429` (your quota, not a bad catalog entry), and it exposed a false negative in its own first version: a 1-token probe made OpenAI's reasoning models return `400 max_tokens reached`, which says nothing about whether they exist. Same lesson as Finding 1 — thinking tokens come out of the visible budget — arriving from the opposite direction.
+
+### Finding 4: cross-lab auditing caught real defects
 
 `claude-opus-5` flagged that a `median()` written by `deepseek-v4-flash` returned an `int` where its annotation promised `float`. Better: on the reasoning task, `gpt-5.6-sol` caught `claude-opus-5` **inventing per-token prices that were never in the prompt**. A same-lab audit is exactly where you would expect that to slide through.
 
-### Finding 4: unverified means unverified
+### Finding 5: unverified means unverified
 
-The one remaining failure scored 0.68 against a 0.70 threshold — a real quality judgment, not a mechanical one. It was returned flagged rather than shipped.
+The one remaining failure scored 0.68 against a 0.70 threshold — a real quality judgment, not a mechanical one, and reproduced identically across runs. It was returned flagged rather than shipped.
+
+Final run, five providers, 16/16 models verified usable: **4/5 verified, 1 escalation, $0.020 generation vs $0.049 on the strongest model (59% saved), $0.075 total.**
 
 Reproduce with `examples/live_check.py` (free) then `examples/live_run.py --live`.
 
@@ -139,7 +147,7 @@ Routing runs gates before scores:
 
 ## Starter catalog
 
-`examples/starter_catalog.json` is a working catalog of **16 models across 5 providers** (Anthropic, OpenAI, Google, DeepSeek, Kimi/Moonshot). It is what makes the demos show real model names instead of `atlas-small`, and four providers is deliberate — cross-lab auditing needs somewhere to cross to.
+`examples/starter_catalog.json` is a working catalog of **16 models across 5 providers** (Anthropic, OpenAI, Google, DeepSeek, Kimi/Moonshot), every id verified by a real call. It is what makes the demos show real model names instead of `atlas-small`, and four providers is deliberate — cross-lab auditing needs somewhere to cross to.
 
 The line between what was measured and what was guessed is the whole point of the file, so it is drawn explicitly:
 
@@ -253,6 +261,8 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 8. **Two catalog model ids did not exist.** `examples/live_check.py` diffed the catalog against the vendors' live `/models` endpoints and found `DeepSeek-V4-Pro-0813` and `DeepSeek-V4-Flash-0731` were unreachable — the docs page lists dated snapshot names while the API serves `deepseek-v4-pro` / `deepseek-v4-flash`. Both were guaranteed 404s, and the entire offline suite passed over them, because `MockProvider` answers to any string. Notably the ids I *expected* to be wrong (OpenAI's) were all correct.
 9. **`api_key=""` silently used the ambient environment key.** `api_key or os.environ.get(...)` treats an explicit empty string as "unset", so a caller passing a config value that failed to load would have billed whatever account happened to be exported in the shell instead of failing loudly. A test asserted the right behaviour and had passed for the wrong reason — there was simply no env key to fall through to. It surfaced the moment real keys were present, and made an unintended API call on the way out.
 10. **The live runner's own summary was apples-to-oranges.** It compared total spend *including* audits against a baseline computed *without* them, charging routing for verification the baseline never paid for. Now reported as three separate lines, because routing and verification are separate economic decisions.
+
+12. **A vendor listed a model it no longer serves.** `gemini-2.5-flash-lite` appeared in `/models` and returned `404 no longer available` at the chat endpoint, so the free listing check passed it. `live_check.py --probe` now makes a real 16-token call per model, and distinguishes retired from rate-limited. Its own first version used a 1-token budget and reported OpenAI's reasoning models as broken — a false negative with the same root cause as the truncation bug.
 
 11. **A token ceiling was being misdiagnosed as poor quality.** The adapters discarded `stop_reason`, so an answer cut off at `max_tokens` looked identical to a complete bad one. A reasoning model that spent 340 of 400 output tokens thinking returned almost nothing, failed its audit as "empty", and triggered a paid escalation to a model that would truncate at the same ceiling. Raising the ceiling took the suite from 3/5 verified with 2 escalations to 4/5 with 1. Truncation is now carried on `Completion.truncated`, named by the auditor before any quality finding, and surfaced on `BrokerResult`.
 
