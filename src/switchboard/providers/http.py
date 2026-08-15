@@ -173,7 +173,11 @@ class AnthropicProvider(_HTTPProviderBase):
         **transport,
     ) -> None:
         super().__init__(**transport)
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        # `is not None`, not `or`: an explicitly passed empty string means
+        # "no key", and must NOT fall through to the ambient environment.
+        # With `or`, a caller passing a config value that failed to load would
+        # silently bill whatever account happens to be exported in the shell.
+        self.api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
         self.base_url = base_url.rstrip("/")
         self.version = version
 
@@ -259,7 +263,10 @@ class OpenAICompatibleProvider(_HTTPProviderBase):
         # reads DEEPSEEK_API_KEY, Google reads GEMINI_API_KEY, and no vendor's
         # key is ever silently used against another vendor's endpoint.
         self.env_var = env_var
-        self.api_key = api_key or os.environ.get(env_var, "")
+        # See AnthropicProvider: an explicit "" means no key, never "fall back
+        # to the environment". Silently substituting an ambient credential for
+        # one a caller deliberately passed is a billing bug, not a convenience.
+        self.api_key = api_key if api_key is not None else os.environ.get(env_var, "")
         self.base_url = base_url.rstrip("/")
         if name:
             self.name = name

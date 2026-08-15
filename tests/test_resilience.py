@@ -7,6 +7,7 @@ touch the network — urlopen is patched and sleeps are injected.
 
 import email.message
 import io
+import os
 import json
 import unittest
 import urllib.error
@@ -185,6 +186,20 @@ class HTTPRetryTests(unittest.TestCase):
     def test_missing_key_is_a_config_error(self):
         with self.assertRaises(ProviderConfigError):
             AnthropicProvider(api_key="").complete("m", "hi")
+
+    def test_explicit_empty_key_does_not_fall_back_to_the_environment(self):
+        # Regression, found only once real keys were present in the shell:
+        # `api_key or os.environ.get(...)` treated an explicit "" as "unset"
+        # and silently substituted the ambient credential. A caller passing a
+        # config value that failed to load would have billed the wrong account
+        # instead of getting a loud error.
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ambient-not-a-real-key"}):
+            self.assertEqual(AnthropicProvider(api_key="").api_key, "")
+            self.assertEqual(
+                OpenAICompatibleProvider(api_key="", env_var="ANTHROPIC_API_KEY").api_key, ""
+            )
+            # Omitting the argument entirely still reads the environment.
+            self.assertEqual(AnthropicProvider().api_key, "sk-ambient-not-a-real-key")
 
     def test_garbage_response_body_is_a_provider_error(self):
         provider = self.make(max_retries=0)

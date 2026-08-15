@@ -241,10 +241,28 @@ def main() -> int:
     print(f"verified:         {sum(1 for _, r in rows if r.verified)}/{len(rows)}")
     print(f"escalated:        {sum(1 for _, r in rows if r.escalated)}")
     print(f"cross-lab audits: {sum(1 for _, r in rows if r.attempts[-1].cross_lab_audit)}")
-    print(f"total spent:      ${spent:.5f} of ${args.budget_usd:.2f} budget")
+
+    # Decomposed, because a single "saving" number here is misleading: the
+    # baseline is generation-only, so comparing it against a total that
+    # includes audits charges routing for verification the baseline never
+    # paid for. Routing and verification are separate economic decisions and
+    # the report has to keep them separate.
+    gen = sum(r.generation_cost_usd for _, r in rows)
+    aud = sum(r.audit_cost_usd for _, r in rows)
     baseline = sum(r.baseline_cost_usd for _, r in rows)
-    print(f"same work on the strongest model: ${baseline:.5f}")
-    print(f"difference:       ${baseline - spent:+.5f}")
+    share = aud / (gen + aud) * 100 if (gen + aud) else 0.0
+    print(f"generation, routed:               ${gen:.5f}")
+    print(f"generation, strongest model:      ${baseline:.5f}")
+    if baseline:
+        print(f"  -> routing saved on generation: ${baseline - gen:+.5f} "
+              f"({(baseline - gen) / baseline * 100:+.0f}%)")
+    print(f"audit overhead:                   ${aud:.5f}  ({share:.0f}% of total spend)")
+    print(f"total spent:                      ${spent:.5f} of ${args.budget_usd:.2f} budget")
+    print()
+    print("Audits are a policy choice, not a routing cost. On small tasks the audit")
+    print("prompt (task + output + rubric, on a frontier grader) dwarfs the work it")
+    print("grades — try --policy cost_first or Policy(auditor_selection=")
+    print("'cheapest_qualified') and compare.")
     print(f"\nTraces: {args.trace}")
     print("These are real audit outcomes — the input for measured capability scores.")
     return 0

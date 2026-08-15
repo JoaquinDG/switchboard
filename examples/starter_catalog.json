@@ -245,7 +245,7 @@
     },
 
     {
-      "model_id": "DeepSeek-V4-Pro-0813",
+      "model_id": "deepseek-v4-pro",
       "provider": "deepseek",
       "tier": "mid",
       "input_cost": 0.435,
@@ -253,7 +253,7 @@
       "latency": "medium",
       "context_window": 1000000,
       "_source": "https://api-docs.deepseek.com/quick_start/pricing",
-      "_note": "Cache-miss input rate. Cache hits are cheaper; Switchboard does not model caching.",
+      "_note": "Cache-miss input rate. Cache hits are cheaper; Switchboard does not model caching. The docs page labels the id 'DeepSeek-V4-Pro-0813', but the API serves the unversioned alias 'deepseek-v4-pro' -- verified against /models on 2026-08-15.",
       "capabilities": {
         "reasoning": 0.85,
         "coding": 0.87,
@@ -264,7 +264,7 @@
       }
     },
     {
-      "model_id": "DeepSeek-V4-Flash-0731",
+      "model_id": "deepseek-v4-flash",
       "provider": "deepseek",
       "tier": "small",
       "input_cost": 0.14,
@@ -272,7 +272,7 @@
       "latency": "fast",
       "context_window": 1000000,
       "_source": "https://api-docs.deepseek.com/quick_start/pricing",
-      "_note": "Cache-miss input rate.",
+      "_note": "Cache-miss input rate. Docs label this 'DeepSeek-V4-Flash-0731'; the API serves 'deepseek-v4-flash'.",
       "capabilities": {
         "reasoning": 0.68,
         "coding": 0.72,
