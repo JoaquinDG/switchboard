@@ -32,6 +32,7 @@ from .providers.base import (
     mock_pool,
 )
 from .providers.http import AnthropicProvider, OpenAICompatibleProvider
+from .providers.live import build_provider, key_status, live_pool, usable_registry
 from .registry import (
     CATALOG_STALE_AFTER_DAYS,
     LATENCY_CLASSES,
@@ -96,13 +97,17 @@ __all__ = [
     "UNKNOWN_CAPABILITY_PRIOR",
     "actual_cost",
     "audit",
+    "build_provider",
     "build_retry_prompt",
     "classify_heuristic",
     "classify_with_model",
     "demo_registry",
     "estimate_cost",
+    "key_status",
+    "live_pool",
     "mock_pool",
     "pick_auditor",
     "route",
     "triage_task",
+    "usable_registry",
 ]

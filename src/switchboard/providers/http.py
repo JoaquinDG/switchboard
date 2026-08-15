@@ -76,11 +76,22 @@ class _HTTPProviderBase:
         except (TypeError, ValueError):
             return None  # HTTP-date form; fall back to computed backoff
 
-    def _request(self, url: str, body: bytes, headers: dict[str, str], model_id: str) -> dict:
-        """POST JSON with retries; raise a typed ProviderError on failure."""
+    def _request(
+        self,
+        url: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        model_id: str,
+        method: str = "POST",
+    ) -> dict:
+        """Send JSON with retries; raise a typed ProviderError on failure.
+
+        GET is supported so catalog verification (listing a vendor's models)
+        reuses the same auth, retry, and error-translation path as inference.
+        """
         last: ProviderError | None = None
         for attempt in range(self.max_retries + 1):
-            req = urllib.request.Request(url, data=body, headers=headers)
+            req = urllib.request.Request(url, data=body, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.loads(resp.read())
@@ -166,6 +177,30 @@ class AnthropicProvider(_HTTPProviderBase):
         self.base_url = base_url.rstrip("/")
         self.version = version
 
+    def _headers(self) -> dict[str, str]:
+        return {
+            "content-type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": self.version,
+        }
+
+    def list_models(self) -> list[str]:
+        """Model ids this key can actually reach, newest first.
+
+        Free to call — no tokens are generated. This is what makes a catalog
+        checkable against reality: a `model_id` that looks plausible but does
+        not exist fails as a hard 404 at inference time, and a routing layer
+        should find that out before it routes production traffic there.
+        """
+        if not self.api_key:
+            raise ProviderConfigError(
+                "ANTHROPIC_API_KEY is not set", provider=self.name
+            )
+        data = self._request(
+            f"{self.base_url}/v1/models?limit=1000", None, self._headers(), "", method="GET"
+        )
+        return [m["id"] for m in data.get("data", []) if "id" in m]
+
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         if not self.api_key:
             raise ProviderConfigError(
@@ -179,14 +214,7 @@ class AnthropicProvider(_HTTPProviderBase):
             }
         ).encode()
         data = self._request(
-            f"{self.base_url}/v1/messages",
-            body,
-            {
-                "content-type": "application/json",
-                "x-api-key": self.api_key,
-                "anthropic-version": self.version,
-            },
-            model_id,
+            f"{self.base_url}/v1/messages", body, self._headers(), model_id
         )
         text = "".join(
             block.get("text", "")
@@ -223,10 +251,15 @@ class OpenAICompatibleProvider(_HTTPProviderBase):
         name: str | None = None,
         *,
         max_tokens_param: str | None = None,
+        env_var: str = "OPENAI_API_KEY",
         **transport,
     ) -> None:
         super().__init__(**transport)
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        # env_var lets one adapter serve every OpenAI-shaped vendor: DeepSeek
+        # reads DEEPSEEK_API_KEY, Google reads GEMINI_API_KEY, and no vendor's
+        # key is ever silently used against another vendor's endpoint.
+        self.env_var = env_var
+        self.api_key = api_key or os.environ.get(env_var, "")
         self.base_url = base_url.rstrip("/")
         if name:
             self.name = name
@@ -234,10 +267,27 @@ class OpenAICompatibleProvider(_HTTPProviderBase):
             "max_completion_tokens" if "api.openai.com" in self.base_url else "max_tokens"
         )
 
+    def _headers(self) -> dict[str, str]:
+        return {
+            "content-type": "application/json",
+            "authorization": f"Bearer {self.api_key}",
+        }
+
+    def list_models(self) -> list[str]:
+        """Model ids this key can reach. Free — no tokens generated."""
+        if not self.api_key:
+            raise ProviderConfigError(
+                f"{self.env_var} is not set for provider {self.name}", provider=self.name
+            )
+        data = self._request(
+            f"{self.base_url}/v1/models", None, self._headers(), "", method="GET"
+        )
+        return [m["id"] for m in data.get("data", []) if "id" in m]
+
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         if not self.api_key:
             raise ProviderConfigError(
-                f"no API key configured for provider {self.name}",
+                f"{self.env_var} is not set for provider {self.name}",
                 provider=self.name,
                 model_id=model_id,
             )
@@ -249,13 +299,7 @@ class OpenAICompatibleProvider(_HTTPProviderBase):
             }
         ).encode()
         data = self._request(
-            f"{self.base_url}/v1/chat/completions",
-            body,
-            {
-                "content-type": "application/json",
-                "authorization": f"Bearer {self.api_key}",
-            },
-            model_id,
+            f"{self.base_url}/v1/chat/completions", body, self._headers(), model_id
         )
         choice = (data.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content", "") or ""

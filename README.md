@@ -7,7 +7,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 186 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 205 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -110,6 +110,45 @@ The line between what was measured and what was guessed is the whole point of th
 - **Prices go stale.** `Registry.from_json` reads `_last_verified` and raises a `CatalogStaleWarning` once the catalog is more than 60 days old. A router confidently using last quarter's price list is precisely the failure this project exists to prevent.
 
 Run any example against it with `--catalog examples/starter_catalog.json`. Because the catalog names real vendors, `mock_pool(registry)` supplies one offline stand-in per provider, so the whole system — cross-lab audits and provider failover included — is exercisable without a single API key.
+
+## Running it for real
+
+Everything above is offline and mocked, and that honesty has a cost: `verified: True` from `MockProvider` means a canned string was graded by a canned grader. It demonstrates the machinery, not the idea. Two scripts close that gap against Anthropic, OpenAI, DeepSeek, and Google.
+
+**Step 1 — verify the catalog. Free.**
+
+```bash
+PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
+```
+
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 205 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+
+**Step 2 — run real tasks. This spends money.**
+
+```bash
+PYTHONPATH=src python3 examples/live_run.py --catalog examples/starter_catalog.json --live --budget-usd 0.50
+```
+
+Without `--live` it prints the plan and the worst-case bill and calls nobody. With it, a real model produces output, a **different real model from a different lab** grades it, escalation fires on genuine disagreement, and the cost accounting reports an actual bill against observed tokens.
+
+Guards, because this is the one part of the repo that can cost you: dry-run is the default; `--budget-usd` is a hard cap checked before each task against its *worst* case (priciest model, every escalation, every audit — not its expected case); `--max-tokens` bounds the term that dominates cost. Real spend on the default suite is typically 10–30x below the ceiling, because routing sends most of it to cheap models.
+
+**Keys.** Read from the environment only — never from a file, never written to one, never logged, never traced. The only thing any of this reports about a key is whether it is set.
+
+| Provider | Variable | Get one |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| `openai` | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
+| `deepseek` | `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com/api_keys) |
+| `google` | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) |
+
+Any subset works. Providers without a key are skipped and named, and `usable_registry` narrows the catalog to what's actually wired up — so a missing key reads as a smaller catalog rather than a mysterious outage. Cross-lab auditing needs two.
+
+Integration tests are opt-in twice over — `SWITCHBOARD_LIVE_TESTS=1` **and** the relevant key — so keys exported for ordinary work never start billing test runs by accident. CI stays fully offline.
+
+```bash
+SWITCHBOARD_LIVE_TESTS=1 PYTHONPATH=src python3 -m unittest tests.test_live
+```
 
 ## Task-type inference
 
@@ -240,9 +279,9 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               186 tests (router, gates, triage, auditor, cross-lab, costs, resilience, catalog)
+tests/               205 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
-examples/            quickstart, agentic workflow (--catalog), starter + template catalogs
+examples/            quickstart, agentic workflow, live_check + live_run, starter + template catalogs
 ```
 
 ## Changelog
