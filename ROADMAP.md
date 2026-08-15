@@ -29,7 +29,7 @@ These are the highest-value items because each one fixes something the repo curr
 - **Why it mattered:** nothing offline could check that a `model_id` is a string a vendor will accept, and every `verified: True` in the repo came from a canned grader. This is also what makes item 1 possible — real audit outcomes are the raw material for measured capability scores.
 
 ### 1. Trace-driven catalog feedback
-- [ ] **Why it matters:** The starter catalog's capability scores are estimates, and the file says so in block capitals. That is the weakest claim in the repo and the first thing a reviewer will poke at. Traces already record audit outcomes per model per task type — the measurement is sitting there unused.
+- [x] **Why it matters:** The starter catalog's capability scores are estimates, and the file says so in block capitals. That is the weakest claim in the repo and the first thing a reviewer will poke at. Traces already record audit outcomes per model per task type — the measurement is sitting there unused.
 - **Done looks like:** a script in `evals/` that reads `traces/*.jsonl` and reports observed audit pass-rate and mean audit score, per model, per task type, with sample counts. Plus a documented path from that report to updated catalog numbers.
 - **Note:** generate real traces first with `examples/live_run.py --live`; `traces/` is gitignored, so a fresh checkout has none. Running the offline examples also produces traces, but their audit outcomes are canned and must not be scored.
 - **Trap:** do not auto-write scores back into the catalog from a handful of samples. Report the numbers *and the sample size*, and say plainly when `n` is too small to act on. A confidently wrong measured score is worse than an honestly labelled estimate.

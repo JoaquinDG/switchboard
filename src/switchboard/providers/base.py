@@ -73,6 +73,15 @@ class Provider(Protocol):
 
     One method on purpose: a new vendor should be a ~30 line adapter, and a
     wide interface would push vendor differences into the broker.
+
+    An implementation may also declare a class or instance attribute
+    ``synthetic: bool = True`` to mark itself as a canned stand-in rather than
+    a real vendor call (see ``MockProvider`` / ``ScriptedProvider`` below).
+    It is read with ``getattr(provider, "synthetic", False)`` rather than
+    required here, so existing third-party adapters do not have to declare it
+    to keep satisfying this protocol. The broker copies it onto every
+    ``Attempt`` and audit verdict it produces, so a trace can tell a measured
+    outcome from a demo one without guessing from model ids or scores.
     """
 
     name: str
@@ -122,6 +131,10 @@ class MockProvider:
     """
 
     name = "mock"
+    # Every verdict this provider hands back is a fixed 0.9/0.35, not a real
+    # model's judgement. Downstream trace consumers (evals/catalog_feedback.py)
+    # rely on this to keep canned outcomes out of measured statistics.
+    synthetic = True
 
     AUDIT_SENTINEL = AUDIT_PROMPT_HEADER
 
@@ -191,6 +204,7 @@ class ScriptedProvider:
         default: str | Exception | None = None,
     ) -> None:
         self.name = name
+        self.synthetic = True
         self._script: dict[str, list[str | Exception]] = {
             k: list(v) for k, v in (script or {}).items()
         }
@@ -237,6 +251,12 @@ class FlakyProvider:
     @property
     def name(self) -> str:  # type: ignore[override]
         return self.inner.name
+
+    @property
+    def synthetic(self) -> bool:
+        # Wraps whatever it is given; a flaky wrapper around a real adapter is
+        # still a real adapter once it stops injecting failures.
+        return getattr(self.inner, "synthetic", False)
 
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         self.calls += 1

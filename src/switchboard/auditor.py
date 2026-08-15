@@ -51,6 +51,11 @@ class AuditVerdict:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    # True when the auditor that produced this verdict was a canned stand-in
+    # (MockProvider, ScriptedProvider) rather than a real vendor call. A
+    # verdict from a mock auditor is not evidence about the producer model;
+    # traces carry this so offline demo runs can never be scored as measured.
+    synthetic: bool = False
 
 
 def pick_auditor(
@@ -233,4 +238,5 @@ def audit(
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         cost_usd=actual_cost(auditor_spec, result.input_tokens, result.output_tokens),
+        synthetic=getattr(provider, "synthetic", False),
     )

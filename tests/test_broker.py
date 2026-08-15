@@ -7,6 +7,7 @@ from switchboard import (
     BALANCED,
     COST_FIRST,
     Broker,
+    Completion,
     ModelSpec,
     MockProvider,
     Policy,
@@ -26,6 +27,49 @@ FAIL_VERDICT = '{"pass": false, "score": 0.2, "issues": ["wrong"]}'
 
 def make_broker(policy=BALANCED, trace_path=None):
     return Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace_path)
+
+
+class BareProvider:
+    """A Provider double with no `synthetic` attribute at all.
+
+    Stands in for a real vendor adapter written before this flag existed, to
+    exercise the getattr(..., False) default rather than assuming every
+    Provider implementation opts in.
+    """
+
+    def __init__(self, name: str, text: str) -> None:
+        self.name = name
+        self._text = text
+
+    def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        return Completion(text=self._text, model_id=model_id, input_tokens=10, output_tokens=10)
+
+
+def two_provider_registry() -> Registry:
+    """Two models on distinct provider names, for exercising cross-lab paths
+    with providers that are not the built-in `MockProvider`."""
+    return Registry(
+        [
+            ModelSpec(
+                model_id="real-a",
+                provider="lab-a",
+                tier="frontier",
+                input_cost=1.0,
+                output_cost=1.0,
+                latency="fast",
+                capabilities={"summarization": 0.9, "audit": 0.9},
+            ),
+            ModelSpec(
+                model_id="real-b",
+                provider="lab-b",
+                tier="frontier",
+                input_cost=1.0,
+                output_cost=1.0,
+                latency="fast",
+                capabilities={"summarization": 0.9, "audit": 0.9},
+            ),
+        ]
+    )
 
 
 class AuditorTests(unittest.TestCase):
@@ -243,6 +287,75 @@ class CrossLabTraceTests(unittest.TestCase):
             self.assertIn("final_audit_cross_lab", record)
             self.assertFalse(record["final_audit_cross_lab"])
             self.assertIn("cross_lab_audit", record["attempts"][0])
+
+
+class SyntheticProvenanceTests(unittest.TestCase):
+    """evals/catalog_feedback.py must be able to tell a canned demo run from a
+    measured one without guessing from model ids or suspiciously round scores.
+    """
+
+    def test_mock_provider_attempts_are_marked_synthetic(self):
+        result = make_broker().run(Task(prompt="summarize", task_type="summarization"))
+        self.assertTrue(result.attempts[0].synthetic)
+
+    def test_scripted_provider_attempts_are_marked_synthetic(self):
+        registry = two_provider_registry()
+        pool = ProviderPool([
+            ScriptedProvider({"real-a": [PASS_VERDICT]}, name="lab-a"),
+            ScriptedProvider({"real-b": [PASS_VERDICT]}, name="lab-b"),
+        ])
+        result = Broker(registry, pool, BALANCED).run(
+            Task(prompt="summarize", task_type="summarization")
+        )
+        self.assertTrue(result.attempts[0].synthetic)
+
+    def test_provider_error_attempt_still_reports_synthetic(self):
+        registry = two_provider_registry()
+        pool = ProviderPool([
+            ScriptedProvider({"real-a": [ProviderUnavailable("503")]}, name="lab-a"),
+            ScriptedProvider({"real-b": [PASS_VERDICT]}, name="lab-b"),
+        ])
+        result = Broker(registry, pool, BALANCED).run(
+            Task(prompt="summarize", task_type="summarization")
+        )
+        failed_attempt = next(a for a in result.attempts if a.error)
+        self.assertTrue(failed_attempt.synthetic)
+
+    def test_a_provider_without_the_attribute_defaults_to_not_synthetic(self):
+        # A third-party Provider written before this flag existed must not be
+        # silently mistaken for a mock — that would make real traces
+        # invisible to trace-driven catalog feedback, not just mocks visible.
+        registry = two_provider_registry()
+        pool = ProviderPool([
+            BareProvider("lab-a", "a genuine-looking answer"),
+            BareProvider("lab-b", PASS_VERDICT),
+        ])
+        result = Broker(registry, pool, BALANCED).run(
+            Task(prompt="summarize", task_type="summarization")
+        )
+        self.assertFalse(result.attempts[0].synthetic)
+
+    def test_a_synthetic_auditor_taints_a_real_producer_attempt(self):
+        # The producer might be real while the auditor that graded it is a
+        # canned stand-in; the pass/fail on this attempt is still not
+        # evidence about the producer, so it must be excluded from scoring.
+        registry = two_provider_registry()
+        pool = ProviderPool([
+            BareProvider("lab-a", "a genuine-looking answer"),
+            ScriptedProvider({"real-b": [PASS_VERDICT]}, name="lab-b"),
+        ])
+        result = Broker(registry, pool, BALANCED).run(
+            Task(prompt="summarize", task_type="summarization")
+        )
+        self.assertTrue(result.attempts[0].synthetic)
+
+    def test_trace_carries_synthetic_flag_on_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            make_broker(trace_path=trace).run(Task(prompt="x", task_type="summarization"))
+            record = json.loads(trace.read_text().strip())
+            self.assertIn("synthetic", record["attempts"][0])
+            self.assertTrue(record["attempts"][0]["synthetic"])
 
 
 class CostAccountingTests(unittest.TestCase):

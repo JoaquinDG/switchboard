@@ -7,7 +7,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 216 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 222 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -186,6 +186,22 @@ The line between what was measured and what was guessed is the whole point of th
 
 Run any example against it with `--catalog examples/starter_catalog.json`. Because the catalog names real vendors, `mock_pool(registry)` supplies one offline stand-in per provider, so the whole system — cross-lab audits and provider failover included — is exercisable without a single API key.
 
+### Closing the loop: measuring capability instead of guessing it
+
+`evals/catalog_feedback.py` reads `traces/*.jsonl` — the decision log every `Broker` run writes — and reports the observed audit pass-rate and mean audit score per model, per task type, with the sample count next to each row. That is the actual measurement the estimates above are standing in for, and it has been sitting unused in every trace file the moment auditing shipped.
+
+```bash
+PYTHONPATH=src python3 examples/live_run.py --catalog examples/starter_catalog.json --live
+PYTHONPATH=src python3 evals/catalog_feedback.py --catalog examples/starter_catalog.json
+```
+
+It never writes a score back into the catalog. Two reasons, both load-bearing:
+
+- **Mocked runs must not count as measurements.** Every `Attempt` and `AuditVerdict` now carries a `synthetic` flag, set by the `Provider` that produced it (`MockProvider` and `ScriptedProvider` say `True`; the HTTP adapters say `False`). The script drops synthetic attempts before it aggregates anything, and — fail-closed, same as the auditor — treats a missing flag as synthetic too, so a trace written before this field existed cannot silently count as real. Run it against `traces/quickstart.jsonl` and it reports exactly zero scored attempts.
+- **A confidently wrong measured score is worse than an honestly labelled estimate** (ROADMAP item 1's trap). Rows below `--min-sample` (default 15) are printed and marked, never acted on automatically. Updating `capabilities[task_type]` for a model that clears the threshold is a manual edit to the catalog JSON — the script tells you which row is ready and what the vendor's page still claims next to it; a person decides whether to change it.
+
+This repo's own `traces/` is empty and gitignored, so no capability score here has actually been replaced by a measured one yet — that only happens once someone runs `live_run.py --live` enough times to clear the sample threshold for a given model and task type.
+
 ## Running it for real
 
 Everything above is offline and mocked, and that honesty has a cost: `verified: True` from `MockProvider` means a canned string was graded by a canned grader. It demonstrates the machinery, not the idea. Two scripts close that gap against Anthropic, OpenAI, DeepSeek, and Google.
@@ -196,7 +212,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 216 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 222 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -365,13 +381,12 @@ Queue entries are strings (returned) or exceptions (raised); the last entry repe
 
 Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)**. The highest-value items are the ones that fix something the repo currently gets wrong rather than something it merely lacks:
 
-- **Trace-driven catalog feedback** — replace the starter catalog's *estimated* capability scores with pass-rates measured from `traces/*.jsonl`. The weakest claim in the repo, and the data is already being recorded.
+- **Scoring terms are not on comparable scales** — cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly, so a policy named `quality_first` can lose a real quality advantage to a smaller latency one. The obvious fix (normalize capability like cost) has already been tried and reverted; see the trap in ROADMAP.md item 1b.
 - **Context-window awareness** — `ModelSpec.context_window` is stored, validated, and never read by the router. A task larger than a model's window can be routed to it today.
 - **Tokenizer-aware cost** — the catalog notes that Claude 4.7+ produce ~30% more tokens for the same text, so comparing vendors on per-token price alone is biased.
 - **Batch-API pricing** — a ~50% discount the router cannot currently see.
-- **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
 
-Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
+Already shipped from that list: **trace-driven catalog feedback** (`evals/catalog_feedback.py`, above) and **confidence-gated triage** (above). Still ahead: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
 
 ## Repo map
 
@@ -386,8 +401,8 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               216 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
-evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
+tests/               222 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+evals/               8 routing scenarios, 40 labeled triage prompts (tuned and held-out), trace-driven catalog feedback
 examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
 ```
 

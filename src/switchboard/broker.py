@@ -72,6 +72,11 @@ class Attempt:
     audit_cost_usd: float = 0.0
     # Set when the provider call itself failed; output_text is empty.
     error: str | None = None
+    # True if the producer or the auditor (whichever is relevant) was a canned
+    # stand-in rather than a real vendor call. evals/catalog_feedback.py must
+    # skip these when measuring capability from traces — a MockProvider audit
+    # is not evidence about the model it "graded".
+    synthetic: bool = False
 
     @property
     def total_cost_usd(self) -> float:
@@ -225,6 +230,7 @@ class Broker:
                         role=role,
                         had_audit_feedback=bool(feedback),
                         error=str(e),
+                        synthetic=self._provider_synthetic(spec.provider),
                     )
                 )
                 # A missing key or bad credentials is a deployment bug. Routing
@@ -270,6 +276,8 @@ class Broker:
                     output_tokens=output.output_tokens,
                     cost_usd=actual_cost(spec, output.input_tokens, output.output_tokens),
                     audit_cost_usd=0.0 if verdict is None else verdict.cost_usd,
+                    synthetic=self._provider_synthetic(spec.provider)
+                    or bool(verdict is not None and verdict.synthetic),
                 )
             )
 
@@ -300,6 +308,19 @@ class Broker:
     ) -> Completion:
         provider = self.providers.get(spec.provider)
         return provider.complete(spec.model_id, build_retry_prompt(task.prompt, feedback or []))
+
+    def _provider_synthetic(self, provider_name: str) -> bool:
+        """Whether the named provider is a canned stand-in, not a real vendor.
+
+        Looked up defensively: a provider that failed to resolve tells us
+        nothing about syntheticity, and this must never raise on top of an
+        already-failed attempt.
+        """
+        try:
+            provider = self.providers.get(provider_name)
+        except KeyError:
+            return False
+        return getattr(provider, "synthetic", False)
 
     def _maybe_audit(
         self, task: Task, output: Completion, spec: ModelSpec
