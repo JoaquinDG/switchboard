@@ -126,6 +126,13 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** the unmarked-compound gate-fire rate in `planner_eval.py` improves without the false-split rate moving off 0.
 - **Trap:** do not fix this by lowering the confidence the heuristic reports across the board. That opens the gate everywhere, which is "model always" with extra steps — measured at 24 calls and 312s to gain one case.
 
+### 1d. A verified step can be worthless to everything downstream
+- [ ] **Why it matters:** measured live. Asked for data absent from the source, every model correctly refused to fabricate and the auditor correctly passed each refusal — then the plan spent **$0.02531 producing three variations of "that data is not here"**. `plan_halt_dependents_on_failure` cannot help: nothing failed. The auditor named it, scoring the second step 0.72 with "adds no value over step s1 — essentially a verbatim restatement, so the step is redundant", but `verified` is a boolean and 0.72 clears the 0.70 threshold.
+- **Done looks like:** a plan stops paying for steps that can only restate their input, without ever suppressing a step that had something to add.
+- **Trap:** the obvious fix — raise `audit_pass_threshold` so 0.72 fails — makes every borderline-but-useful answer fail too. The signal is not "low score", it is "this output adds nothing over its input", and those are different measurements.
+- **Second trap:** do not detect it with string similarity between a step's output and its injected context. A correct summarisation legitimately restates its input; the difference is whether it *adds* anything, which similarity cannot see.
+- **Worth trying:** the auditor already produces the judgement in prose. Asking it for a structured `adds_value` field alongside `pass` is one call's worth of change and needs no new machinery.
+
 ### 2. Context-window awareness in routing
 - [ ] **Why it matters:** `ModelSpec.context_window` is stored, validated, and **never read by the router** (verified: no reference outside `registry.py`). A task with 400k estimated input tokens can be routed today to a 200k model, which fails at the provider with a hard error rather than being caught as a routing constraint.
 - **Done looks like:** a hard gate — models whose context window cannot hold `est_input_tokens` plus `est_output_tokens` are ineligible, with the exclusion named in the rationale. Gate ordering and the degrade-upward rule must be preserved. Eval scenario covering it.
