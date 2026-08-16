@@ -219,6 +219,37 @@ class SplittingTests(unittest.TestCase):
                 validate_plan(plan_heuristic(request))
 
 
+class FragmentCoverageTests(unittest.TestCase):
+    """A plan that silently omits part of the request is worse than no plan."""
+
+    def test_short_fragments_are_absorbed_not_dropped(self):
+        # Regression, found in phase-2 smoke testing: splitting on `then` gave
+        # a two-word middle fragment ("summarize it") which a minimum-length
+        # filter discarded, producing a plan that never summarised anything.
+        request = ("Extract the pricing from these pages, then summarize it, "
+                   "then recommend a response.")
+        p = plan_heuristic(request)
+        joined = " ".join(step.prompt.lower() for step in p.steps)
+        for word in ("extract", "summarize", "recommend"):
+            self.assertIn(word, joined, f"{word!r} vanished from the plan")
+
+    def test_absorption_is_reported_in_the_signals(self):
+        p = plan_heuristic(
+            "Extract the pricing, then summarize it, then recommend a response."
+        )
+        self.assertTrue(any("absorbed" in sig for sig in p.signals), p.signals)
+
+    def test_no_step_is_ever_empty(self):
+        for request in (
+            "Extract the data, then summarize, then draft the copy, then finally send it.",
+            "1. Extract.\n2. Summarize.\n3. Recommend.",
+            "First, extract. Second, decide.",
+        ):
+            with self.subTest(request=request[:40]):
+                for step in plan_heuristic(request).steps:
+                    self.assertTrue(step.prompt.strip())
+
+
 class ConfidenceGateTests(unittest.TestCase):
     """Low confidence is the signal that opens the model gate. It has to fire
     on the case the heuristic genuinely cannot judge."""

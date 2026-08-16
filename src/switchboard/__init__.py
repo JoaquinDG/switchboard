@@ -6,7 +6,7 @@ when a provider falls over, and account for every dollar it took.
 """
 
 from .auditor import AUDIT_PROMPT_TEMPLATE, AuditVerdict, audit, pick_auditor
-from .broker import Attempt, Broker, BrokerResult
+from .broker import Attempt, Broker, BrokerResult, PlanResult, StepResult
 from .policies import (
     BALANCED,
     COST_FIRST,
@@ -26,6 +26,13 @@ from .planner import (
     plan_heuristic,
     topological_order,
     validate_plan,
+)
+from .replay import (
+    ReplayedPlan,
+    ReplayedStep,
+    read_trace,
+    replay_plans,
+    task_records,
 )
 from .prompts import AUDIT_PROMPT_HEADER, ESCALATION_RETRY_TEMPLATE, build_retry_prompt
 from .providers.base import (
@@ -96,6 +103,7 @@ __all__ = [
     "Plan",
     "PlanStep",
     "PlanValidationError",
+    "PlanResult",
     "PRESETS",
     "Policy",
     "Provider",
@@ -107,10 +115,13 @@ __all__ = [
     "ProviderUnavailable",
     "QUALITY_FIRST",
     "Registry",
+    "ReplayedPlan",
+    "ReplayedStep",
     "RoutingDecision",
     "ScoredModel",
     "LATENCY_CLASSES",
     "ScriptedProvider",
+    "StepResult",
     "TASK_TYPES",
     "TIERS",
     "TIER_RANK",
@@ -129,10 +140,13 @@ __all__ = [
     "live_pool",
     "mock_pool",
     "no_split_plan",
+    "read_trace",
+    "replay_plans",
     "parse_plan",
     "plan_heuristic",
     "pick_auditor",
     "route",
+    "task_records",
     "topological_order",
     "score_models",
     "triage_task",

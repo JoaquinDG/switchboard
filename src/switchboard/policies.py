@@ -90,6 +90,14 @@ class Policy:
     # model layer's accuracy on ~12% of the calls. Set to 0.0 to never ask a
     # model, or above 1.0 to always ask.
     triage_confidence_threshold: float = 0.25
+    # Planner: ask a model to decompose only when the heuristic's confidence
+    # falls below this. Same shape and same reasoning as triage's gate.
+    plan_confidence_threshold: float = 0.25
+    # Characters of a prior step's output threaded into a dependent step.
+    # Generous by default: truncating context silently is how a pipeline
+    # produces confidently wrong later steps. When it does truncate, the
+    # truncation is named in the step's trace event rather than swallowed.
+    plan_context_cap_chars: int = 24_000
     # How many times the broker may reroute to the next-ranked model when a
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
@@ -107,6 +115,7 @@ class Policy:
             ("capability_margin", self.capability_margin),
             ("audit_pass_threshold", self.audit_pass_threshold),
             ("min_auditor_capability", self.min_auditor_capability),
+            ("plan_confidence_threshold", self.plan_confidence_threshold),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{label} must be in [0, 1], got {value}")
@@ -114,6 +123,11 @@ class Policy:
             raise ValueError(
                 f"auditor_selection must be one of {AUDITOR_SELECTION_STRATEGIES}, "
                 f"got {self.auditor_selection!r}"
+            )
+        if not isinstance(self.plan_context_cap_chars, int) or self.plan_context_cap_chars < 0:
+            raise ValueError(
+                f"plan_context_cap_chars must be a non-negative int, "
+                f"got {self.plan_context_cap_chars!r}"
             )
         for label, value in (
             ("max_escalations", self.max_escalations),

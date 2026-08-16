@@ -33,9 +33,80 @@ from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
 from .registry import TIER_RANK, ModelSpec, Registry
 from .router import RoutingDecision, actual_cost, route, score_models
+from .planner import (
+    Plan,
+    validate_plan,
+    PlanStep,
+    PlanValidationError,
+    no_split_plan,
+    plan_heuristic,
+    topological_order,
+)
 from .triage import AUTO, Triage, triage_task
 
 _ESCALATION_ORDER = {"small": "mid", "mid": "frontier", "frontier": None}
+
+# How a dependent step is handed its predecessor's output. Delimited rather
+# than concatenated so the receiving model can tell the brief from the input.
+_CONTEXT_TEMPLATE = """{prompt}
+
+--- OUTPUT OF STEP {step_id} (use this as your input) ---
+{context}
+--- END OF STEP {step_id} OUTPUT ---"""
+
+
+@dataclass
+class StepResult:
+    """One plan step, its routing outcome, and what was threaded into it."""
+
+    step_id: str
+    step: PlanStep
+    result: BrokerResult
+    # Characters of upstream output injected, and whether the cap bit. A
+    # truncated context is named rather than swallowed: it is the most likely
+    # cause of a confidently wrong later step.
+    injected_chars: int = 0
+    injected_truncated: bool = False
+    injected_from: tuple[str, ...] = ()
+
+
+@dataclass
+class PlanResult:
+    """An executed plan: the output, the bill, and what it is compared against."""
+
+    plan: Plan
+    steps: list[StepResult] = field(default_factory=list)
+    final_text: str = ""
+    # Cost of what actually ran, audits and escalations included.
+    routed_cost_usd: float = 0.0
+    # Every step priced on the strongest model qualified for its own type.
+    baseline_best_model_usd: float = 0.0
+    # The whole request as ONE call to the strongest model, at the request's
+    # own token estimate. This is the "what you would have done without
+    # Switchboard" number and it is MODELLED, never run — see
+    # `baseline_single_call_is_modelled`.
+    baseline_single_call_usd: float = 0.0
+    baseline_single_call_model: str = ""
+    baseline_single_call_is_modelled: bool = True
+
+    @property
+    def verified(self) -> bool:
+        """True only if every step passed its own audit.
+
+        Deliberately strict and deliberately step-wise: v1 has no plan-level
+        audit, so this cannot speak to whether the assembled answer is
+        coherent — only that no individual step failed.
+        """
+        return bool(self.steps) and all(s.result.verified for s in self.steps)
+
+    @property
+    def is_split(self) -> bool:
+        return self.plan.is_split
+
+    @property
+    def saved_vs_single_call_usd(self) -> float:
+        """Against the modelled single-call baseline. Modelled, not measured."""
+        return self.baseline_single_call_usd - self.routed_cost_usd
 
 
 @dataclass
@@ -292,6 +363,168 @@ class Broker:
             feedback = list(verdict.issues) if verdict else []
             escalations_used += 1
             spec, role = next_spec, "escalation"
+
+    def run_plan(self, request: str | Plan) -> PlanResult:
+        """Decompose a compound request, run each step, and report the bill.
+
+        A caller-supplied Plan is validated identically to a generated one and
+        then treated as authoritative — the same courtesy the broker extends to
+        a caller-supplied `task_type`.
+
+        Every step is dispatched through `run()` unchanged. Nothing here
+        bypasses triage, the gates, auditing, escalation or failover; the
+        planner only decides what the units of work are.
+        """
+        plan = self._resolve_plan(request)
+        self._trace_event("plan_proposed", {
+            "request": plan.request,
+            "planned_by": plan.planned_by,
+            "confidence": plan.confidence,
+            "rationale": plan.rationale,
+            "signals": list(plan.signals),
+            "is_split": plan.is_split,
+            "steps": [asdict(step) for step in plan.steps],
+        })
+
+        outputs: dict[str, str] = {}
+        results: list[StepResult] = []
+        cap = self.policy.plan_context_cap_chars
+
+        for step in topological_order(plan):
+            prompt, injected, truncated, sources = self._thread_context(step, outputs, cap)
+            # Injected context is real input the model pays for, so the routing
+            # estimate is re-derived at dispatch instead of trusting the
+            # planner's guess from before anything had run.
+            task = Task(
+                prompt=prompt,
+                task_type=step.task_type,
+                complexity=step.complexity,
+                est_input_tokens=step.est_input_tokens + injected // 4,
+                est_output_tokens=step.est_output_tokens,
+            )
+            self._trace_event("step_dispatched", {
+                "step_id": step.step_id,
+                "task_type": step.task_type,
+                "complexity": step.complexity,
+                "est_input_tokens": task.est_input_tokens,
+                "injected_chars": injected,
+                "injected_truncated": truncated,
+                "injected_from": list(sources),
+            })
+
+            result = self.run(task)
+            outputs[step.step_id] = result.final_text
+            results.append(StepResult(
+                step_id=step.step_id, step=step, result=result,
+                injected_chars=injected, injected_truncated=truncated,
+                injected_from=sources,
+            ))
+            self._trace_event("step_completed", {
+                "step_id": step.step_id,
+                "final_model": result.final_model,
+                "verified": result.verified,
+                "escalated": result.escalated,
+                "truncated": result.truncated,
+                "generation_cost_usd": round(result.generation_cost_usd, 8),
+                "audit_cost_usd": round(result.audit_cost_usd, 8),
+                "total_cost_usd": round(result.total_cost_usd, 8),
+                "output_text": result.final_text,
+                "attempts": len(result.attempts),
+            })
+
+        plan_result = self._finalize_plan(plan, results)
+        self._trace_event("plan_completed", {
+            "verified": plan_result.verified,
+            "is_split": plan_result.is_split,
+            "steps": len(plan_result.steps),
+            "routed_cost_usd": round(plan_result.routed_cost_usd, 8),
+            "baseline_best_model_usd": round(plan_result.baseline_best_model_usd, 8),
+            "baseline_single_call_usd": round(plan_result.baseline_single_call_usd, 8),
+            "baseline_single_call_model": plan_result.baseline_single_call_model,
+            "baseline_single_call_is_modelled": True,
+            "final_text": plan_result.final_text,
+        })
+        return plan_result
+
+    def _resolve_plan(self, request: str | Plan) -> Plan:
+        """Validate a supplied plan, or build one; fail closed to single-task."""
+        if isinstance(request, Plan):
+            validate_plan(request)  # supplied plans get no special treatment
+            return request
+        try:
+            return plan_heuristic(request)
+        except PlanValidationError as e:
+            # A planner that cannot produce a usable plan must not take the
+            # request down with it. Degrade to routing the whole thing as one
+            # task and say so, rather than failing the caller's request.
+            self._trace_event("plan_degraded", {"reason": str(e), "request": request})
+            return no_split_plan(request, f"planner failed ({e}); routed as one task")
+
+    def _thread_context(
+        self, step: PlanStep, outputs: dict[str, str], cap: int
+    ) -> tuple[str, int, bool, tuple[str, ...]]:
+        """Append upstream outputs to a step's prompt, under a labelled fence."""
+        if not step.depends_on:
+            return step.prompt, 0, False, ()
+        prompt = step.prompt
+        injected = 0
+        truncated = False
+        used: list[str] = []
+        for dep in step.depends_on:
+            context = outputs.get(dep, "")
+            if not context:
+                continue
+            if cap and len(context) > cap:
+                context = context[:cap]
+                truncated = True
+            prompt = _CONTEXT_TEMPLATE.format(
+                prompt=prompt, step_id=dep, context=context
+            )
+            injected += len(context)
+            used.append(dep)
+        return prompt, injected, truncated, tuple(used)
+
+    def _finalize_plan(self, plan: Plan, results: list[StepResult]) -> PlanResult:
+        """Assemble the result and price the two baselines."""
+        routed = sum(r.result.total_cost_usd for r in results)
+        best_model = sum(r.result.baseline_cost_usd for r in results)
+
+        # The single-call baseline: the untouched request on the strongest
+        # model for its own inferred type, at its own token estimate. Modelled
+        # rather than run — nobody is charged to produce a comparison number.
+        whole = no_split_plan(plan.request, "baseline").steps[0]
+        strongest = max(
+            self.registry.all(),
+            key=lambda m: (m.capability_for(whole.task_type), TIER_RANK.get(m.tier, 0)),
+        )
+        single = actual_cost(
+            strongest,
+            whole.est_input_tokens + sum(s.step.est_input_tokens for s in results),
+            whole.est_output_tokens + sum(s.step.est_output_tokens for s in results),
+        )
+        return PlanResult(
+            plan=plan,
+            steps=results,
+            final_text=results[-1].result.final_text if results else "",
+            routed_cost_usd=routed,
+            baseline_best_model_usd=best_model,
+            baseline_single_call_usd=single,
+            baseline_single_call_model=strongest.model_id,
+        )
+
+    def _trace_event(self, event: str, payload: dict) -> None:
+        """Append a named plan event to the same JSONL stream.
+
+        New records carry an "event" key; the existing per-task summary records
+        do not, and are not modified. A reader treats a missing "event" as the
+        legacy task record. Purely additive, so committed traces stay readable.
+        """
+        if not self.trace_path:
+            return
+        record = {"ts": time.time(), "event": event, **payload}
+        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.trace_path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
 
     # -- internals ---------------------------------------------------------
 

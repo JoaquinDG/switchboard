@@ -343,6 +343,29 @@ _WORK_VERBS = {
 _MIN_FRAGMENT_WORDS = 3
 
 
+def _absorb_short(parts: list[str], signals: list[str]) -> list[str]:
+    """Fold sub-minimum fragments into a neighbour instead of discarding them.
+
+    Dropping them silently omits part of the user's request: "extract the
+    pricing, then summarize it, then recommend a response" split on `then`
+    yields a two-word middle fragment, and filtering it out produced a plan
+    that never summarised anything. A fragment too small to stand alone is
+    still work someone asked for, so it joins its predecessor.
+    """
+    kept: list[str] = []
+    for part in (p for p in parts if p.strip()):
+        if len(part.split()) < _MIN_FRAGMENT_WORDS and kept:
+            kept[-1] = f"{kept[-1]}, {part}".strip()
+            signals.append(f"absorbed short fragment {part!r} into the previous step")
+        else:
+            kept.append(part)
+    # A short leading fragment has no predecessor; give it its successor.
+    if len(kept) > 1 and len(kept[0].split()) < _MIN_FRAGMENT_WORDS:
+        signals.append(f"absorbed short leading fragment {kept[0]!r}")
+        kept = [f"{kept[0]}, {kept[1]}".strip()] + kept[2:]
+    return kept
+
+
 def _segment(request: str) -> tuple[list[str], list[str], str]:
     """Cut a request on explicit structure only. Returns (fragments, signals, kind)."""
     signals: list[str] = []
@@ -365,7 +388,7 @@ def _segment(request: str) -> tuple[list[str], list[str], str]:
             if re.search(p, request, re.IGNORECASE):
                 signals.append(f"sequence+{weight}:{p}")
         parts = [p.strip(" ,;.") for p in re.split(pattern, request, flags=re.IGNORECASE)]
-        parts = [p for p in parts if len(p.split()) >= _MIN_FRAGMENT_WORDS]
+        parts = _absorb_short(parts, signals)
         if len(parts) > 1:
             return parts, signals, "sequence"
 
