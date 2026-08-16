@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 302 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 308 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -248,7 +248,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 302 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 308 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -457,6 +457,12 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 18. **Confidence gating is only as good as the heuristic's self-knowledge.** Triage's confidence was a perfect separator of its own errors. The planner's is not: of two unmarked compound requests, one scored 0.20 (gate opens, model rescues it) and one scored 0.95 while being wrong (gate stays shut). Same mechanism, different reliability — which is an argument for measuring a gate on every classifier that uses one, rather than assuming the property transfers.
 
+19. **The plan had no assembly step, and the plan-level audit caught it.** Running a decomposed pipeline against live models, the final audit scored **0.15** and complained the answer *"skips the first requested step entirely"*. It was right, and the bug was mine: `PlanResult.final_text` was only the **last** step's output, so a request asking for three deliverables was audited against one third of its answer. Added `assembled_text` — every step's output, labelled — and pointed the audit at it. Same request, same models: **0.15 → 0.85, passed.** The audit then produced real critique instead (cannibalisation risk, storage dropped from the exposure analysis) — the kind no per-step audit can see, which is the entire argument for having it.
+
+20. **A connection reset escaped the type system and killed a whole run.** `ConnectionResetError` is an `OSError` but *not* a `URLError`: urllib wraps failures during connection *setup*, while a reset mid-response surfaces raw. So it bypassed the adapter's retry loop **and** the broker's failover — precisely the two mechanisms built to survive it — and took a live plan down mid-audit. A dropped connection is the most ordinary transient failure there is. Now typed as `ProviderUnavailable` and retried.
+
+21. **The default output ceiling was too low, three separate times.** The `Provider` protocol defaults to 1024 tokens, and reasoning models spend thinking tokens from that same budget before emitting anything. Measured: `claude-opus-5` spent 340 of 400; `deepseek-v4-flash` emitted **zero characters** at 1024 and valid JSON at 3000. It surfaced once as a fake quality failure, once as "malformed JSON" from the planner, and once as a truncated pipeline step. Now `Policy.max_output_tokens`, defaulting to 2000, applied to every generation and audit call. Three incidents from one root cause is a default, not a coincidence.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -528,7 +534,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               302 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               308 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
                      triage_ab/planner_ab, catalogs

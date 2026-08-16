@@ -67,6 +67,13 @@ class Policy:
     # *upward* (restrict to the highest tier available) rather than opening
     # the field back up to the whole catalog.
     on_no_qualified_model: str = "escalate_tier"
+    # Output ceiling for every generation and audit call the broker makes.
+    # The Provider protocol defaults to 1024, which measurement showed is too
+    # low three separate times: a reasoning model spends thinking tokens from
+    # this same budget before it emits anything, so 1024 can produce ZERO
+    # visible characters. Observed: claude-opus-5 burned 340 of 400 thinking;
+    # deepseek-v4-flash emitted nothing at 1024 and valid JSON at 3000.
+    max_output_tokens: int = 2_000
     # Audit settings
     audit_enabled: bool = True
     audit_pass_threshold: float = 0.7
@@ -134,6 +141,11 @@ class Policy:
             raise ValueError(
                 f"plan_context_cap_chars must be a non-negative int, "
                 f"got {self.plan_context_cap_chars!r}"
+            )
+        if not isinstance(self.max_output_tokens, int) or self.max_output_tokens < 1:
+            raise ValueError(
+                f"max_output_tokens must be a positive int, "
+                f"got {self.max_output_tokens!r}"
             )
         for label, value in (
             ("max_escalations", self.max_escalations),

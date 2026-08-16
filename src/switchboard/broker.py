@@ -77,7 +77,17 @@ class PlanResult:
 
     plan: Plan
     steps: list[StepResult] = field(default_factory=list)
+    # The LAST step's output. Correct for a transform chain, where each step
+    # rewrites its predecessor and the final rewrite is the answer.
     final_text: str = ""
+    # Every step's output, labelled. Correct for a request that asks for
+    # several deliverables — "extract X, summarise Y, recommend Z" is answered
+    # by all three, and the last step alone is a third of the answer.
+    #
+    # Found live: the plan-level audit read final_text against the original
+    # request and reported "skips the first requested step entirely". It was
+    # right. The extraction had happened; it just was not in what got audited.
+    assembled_text: str = ""
     # Cost of what actually ran, audits and escalations included.
     routed_cost_usd: float = 0.0
     # Every step priced on the strongest model qualified for its own type.
@@ -475,6 +485,7 @@ class Broker:
             "baseline_single_call_model": plan_result.baseline_single_call_model,
             "baseline_single_call_is_modelled": True,
             "final_text": plan_result.final_text,
+            "assembled_text": plan_result.assembled_text,
         })
         return plan_result
 
@@ -537,10 +548,15 @@ class Broker:
             whole.est_input_tokens + sum(s.step.est_input_tokens for s in results),
             whole.est_output_tokens + sum(s.step.est_output_tokens for s in results),
         )
+        assembled = "\n\n".join(
+            f"[{r.step_id} · {r.step.task_type}]\n{r.result.final_text.strip()}"
+            for r in results
+        )
         return PlanResult(
             plan=plan,
             steps=results,
             final_text=results[-1].result.final_text if results else "",
+            assembled_text=assembled,
             routed_cost_usd=routed,
             baseline_best_model_usd=best_model,
             baseline_single_call_usd=single,
@@ -556,8 +572,11 @@ class Broker:
         the original request in front of it.
         """
         producer = self.registry.get(result.steps[-1].result.final_model)
+        # The ASSEMBLED answer, not just the last step: the original request
+        # may have asked for several things, and auditing one third of the
+        # answer against all of it reports failures that did not happen.
         assembled = Completion(
-            text=result.final_text,
+            text=result.assembled_text or result.final_text,
             model_id=producer.model_id,
             input_tokens=0,
             output_tokens=0,
@@ -596,7 +615,11 @@ class Broker:
         self, spec: ModelSpec, task: Task, feedback: list[str] | None = None
     ) -> Completion:
         provider = self.providers.get(spec.provider)
-        return provider.complete(spec.model_id, build_retry_prompt(task.prompt, feedback or []))
+        return provider.complete(
+            spec.model_id,
+            build_retry_prompt(task.prompt, feedback or []),
+            max_tokens=self.policy.max_output_tokens,
+        )
 
     def _maybe_audit(
         self, task: Task, output: Completion, spec: ModelSpec
