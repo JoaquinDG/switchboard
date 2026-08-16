@@ -53,6 +53,7 @@ jobs:
           PYTHONPATH=src python examples/agentic_workflow.py
           PYTHONPATH=src python examples/agentic_workflow.py --catalog examples/starter_catalog.json
           PYTHONPATH=src python examples/agentic_workflow.py --plan
+          PYTHONPATH=src python -m switchboard.cli "extract the dates from this email"
 
       - name: Package builds
         run: |
