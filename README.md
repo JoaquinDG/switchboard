@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 335 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 335 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -333,9 +333,9 @@ Two things this settled.
 **Confidence gating is bounded by the heuristic's self-knowledge, and here that bound bites.** For triage, confidence was a *perfect* separator: every wrong classification scored exactly 0.00. For the planner it is not. Of two genuinely compound requests with no structure to cut on:
 
 - *"Read this contract, extract the payment terms, and tell me if we should sign it"* → confidence **0.20**. The heuristic knows it cannot judge, the gate opens, the model splits it correctly.
-- *"Take these support tickets, work out which themes are growing, write me something I can send"* → confidence **0.95**. Confidently wrong. No connective, and the phrasings ("work out", "write me something") match none of the work-verb patterns, so it sees one job. **The gate never opens.**
+- *"Take these support tickets, work out which themes are growing, write me something I can send"* → confidence **0.95** at the time this table was measured. Confidently wrong: no connective, and the phrasings ("work out", "write me something") matched none of the work-verb patterns, so it saw one job and the gate never opened.
 
-A blind spot is worse than a known unknown: gating cannot rescue a case the heuristic is confident about. That is why the unmarked compounds are scored separately in the eval rather than folded into coverage — the number that matters there is not "did it split" but "did it know it couldn't tell".
+A blind spot is worse than a known unknown: gating cannot rescue a case the heuristic is confident about. That is why the unmarked compounds are scored separately in the eval rather than folded into coverage — the number that matters there is not "did it split" but "did it know it couldn't tell". **Update:** the vocabulary gap above has since been closed (ROADMAP 1c, learning 24) — that request now scores 0.20 offline. The table's per-case numbers predate the fix; they are left as the historical live measurement rather than edited, since no live run has been re-executed to replace them.
 
 Latency, not money, is the reason the gate is worth having: **13s per model plan**, so always-asking costs 312s across the set to gain one case over the gate's one call.
 
@@ -473,6 +473,8 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
 
+24. **A blind spot named in the eval got fixed by naming it.** Learning 18 measured the planner's confidence gate missing an unmarked compound outright: "work out which themes are growing, write me something I can send" scored 0.95 (confidently one job) because neither verb matched the heuristic's work-verb patterns — `write` required an article before its object noun, and nothing covered `work out`/`figure out` at all. Widened both patterns; the request now scores 0.20 and the gate opens on it, offline, with no model call spent to find out. The live table above (`examples/planner_ab.py`) predates this fix and needs a fresh live run before its per-case numbers can be trusted again — the offline gate-fire measurement in `evals/planner_eval.py` is current.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -545,7 +547,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               335 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
