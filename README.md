@@ -11,13 +11,13 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 312 tests
-PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
+PYTHONPATH=src python3 -m unittest discover -s tests   # 318 tests
+PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
 PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json
 
-pip install -e . && switchboard "extract the dates from this email"   # one-line CLI, no keys needed
+pip install -e . && switchboard "extract the dates from this email"   # one-line CLI, no keys
 ```
 
 Nothing here needs an API key, a network connection, or a build step.
@@ -40,7 +40,7 @@ you  ->  someone's app  ->  [ SWITCHBOARD ]  ->  Anthropic / OpenAI / Google / D
                               ^ here                        ^ per-token billing lives here
 ```
 
-Today the integration is a Python import, or `switchboard "your prompt"` on the command line for a quick look with no code at all. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
+Today the integration is a Python import, or `switchboard "your prompt"` on the command line for a look with no code at all. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
 
 ### Compound requests: what decomposition is actually for
 
@@ -149,7 +149,9 @@ Two things fall out of that table.
 
 **`quality_first` routed to mid-tier models, not frontier.** Not a router bug — a scale bug in the weights. Cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. On this catalog capability spans 0.78-0.90 for extraction, so an 0.85 quality weight buys 0.102 of influence while an 0.10 latency weight buys 0.080. On `reasoning@0.6`, `claude-opus-5`'s 0.093 quality advantage loses to `gemini-3.7-flash`'s 0.080 latency advantage.
 
-The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis. The finding and the failed fix are both recorded in [ROADMAP.md](ROADMAP.md) item 1b rather than patched over.
+The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis.
+
+**Since fixed, by a different route.** Capability now normalizes against `UNKNOWN_CAPABILITY_PRIOR` (0.5) — a fixed catalog-wide constant, *not* the observed range of whichever candidates happen to be competing on a given call. No honest catalog rates a real model below "we have no idea", so 0.5–1.0 is capability's actual working range, the same way cost is already log-scaled and latency already spans its three tiers. Because the floor does not depend on who else showed up, it cannot reintroduce the candidate-count artifact that killed the first attempt. `quality_first` on `reasoning@0.6` now picks `claude-opus-5`, and the narrow demo catalog still keeps easy extraction on the small model — the case the rejected fix broke. The table above is left as originally measured rather than restated with numbers nobody re-ran live.
 
 ### Finding 4: verification, not inference, dominates the bill
 
@@ -250,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 312 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 318 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -344,6 +346,8 @@ Over-splitting is the expensive error: extra calls, extra audits, extra latency,
 ### Execution
 
 Steps run in dependency order, each dispatched through `Broker.run()` **unchanged**: nothing bypasses triage, the gates, auditing, escalation or failover. A dependent step gets its predecessor's output under a labelled fence, and the routing estimate is re-derived at dispatch because injected context is real input someone pays for. Truncation at `Policy.plan_context_cap_chars` is **named in the trace**, never swallowed.
+
+If a step fails its audit, the steps that **depend** on it are skipped rather than run against rejected input — 58% of a failing run's spend used to land after the failure was already known. Independent steps still run, and `result.skipped_steps` names each skip and why. Set `Policy.plan_halt_dependents_on_failure=False` when a later step's partial answer is useful on its own.
 
 `result.verified` means every step passed its own audit. That is not the same as the assembled answer being coherent — set `Policy.plan_final_audit=True` for one extra audit of the assembled result against the *original* request, which is the only check that can see whether the pipeline answered the question it was asked.
 
@@ -459,6 +463,16 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 18. **Confidence gating is only as good as the heuristic's self-knowledge.** Triage's confidence was a perfect separator of its own errors. The planner's is not: of two unmarked compound requests, one scored 0.20 (gate opens, model rescues it) and one scored 0.95 while being wrong (gate stays shut). Same mechanism, different reliability — which is an argument for measuring a gate on every classifier that uses one, rather than assuming the property transfers.
 
+19. **The plan had no assembly step, and the plan-level audit caught it.** Running a decomposed pipeline against live models, the final audit scored **0.15** and complained the answer *"skips the first requested step entirely"*. It was right, and the bug was mine: `PlanResult.final_text` was only the **last** step's output, so a request asking for three deliverables was audited against one third of its answer. Added `assembled_text` — every step's output, labelled — and pointed the audit at it. Same request, same models: **0.15 → 0.85, passed.** The audit then produced real critique instead (cannibalisation risk, storage dropped from the exposure analysis) — the kind no per-step audit can see, which is the entire argument for having it.
+
+20. **A connection reset escaped the type system and killed a whole run.** `ConnectionResetError` is an `OSError` but *not* a `URLError`: urllib wraps failures during connection *setup*, while a reset mid-response surfaces raw. So it bypassed the adapter's retry loop **and** the broker's failover — precisely the two mechanisms built to survive it — and took a live plan down mid-audit. A dropped connection is the most ordinary transient failure there is. Now typed as `ProviderUnavailable` and retried.
+
+21. **The default output ceiling was too low, three separate times.** The `Provider` protocol defaults to 1024 tokens, and reasoning models spend thinking tokens from that same budget before emitting anything. Measured: `claude-opus-5` spent 340 of 400; `deepseek-v4-flash` emitted **zero characters** at 1024 and valid JSON at 3000. It surfaced once as a fake quality failure, once as "malformed JSON" from the planner, and once as a truncated pipeline step. Now `Policy.max_output_tokens`, defaulting to 2000, applied to every generation and audit call. Three incidents from one root cause is a default, not a coincidence.
+
+22. **A plan kept building on a step it had already rejected.** When a step failed its audit, every dependent step still ran — consuming the rejected output as ground truth and producing a confidently worded answer built on it. Measured: **58% of a run's spend happened after the failure was already known.** Dependents of a failed step are now skipped by default (`Policy.plan_halt_dependents_on_failure`), with the reason recorded per step and carried through replay. Independent steps still run: only dependents are poisoned. Same information, 58% less money, and the gap in the answer is explicit instead of papered over.
+
+23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -523,15 +537,15 @@ src/switchboard/
   policies.py        Task + Policy: the explicit tradeoff
   triage.py          bare prompt -> task_type + complexity, always labeled by layer
   prompts.py         audit + retry prompt text, single owner, no test-only markers
+  cli.py             `switchboard "prompt"` entry point: triage -> route -> run -> print
   planner.py         compound request -> Plan; anti-split heuristic + gated model layer
   replay.py          rebuild a whole plan run from the trace alone
   router.py          gates -> scoring -> explained decision (+ warnings)
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
-  cli.py             `switchboard "prompt"` console entry point: triage -> route -> run -> print
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               312 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring, CLI)
+tests/               318 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
                      triage_ab/planner_ab, catalogs

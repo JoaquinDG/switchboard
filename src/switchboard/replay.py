@@ -49,6 +49,7 @@ PLAN_EVENTS = (
     "step_completed",
     "plan_completed",
     "attempt_discarded",
+    "step_skipped",
 )
 
 
@@ -96,6 +97,8 @@ class ReplayedPlan:
     baseline_single_call_model: str = ""
     baseline_single_call_is_modelled: bool = True
     final_text: str = ""
+    assembled_text: str = ""
+    skipped_steps: list[tuple[str, str]] = field(default_factory=list)
     # Set when the planner failed and the request was routed as one task.
     degraded_reason: str | None = None
     # Model plans that failed validation and were paid for anyway.
@@ -248,6 +251,10 @@ def replay_plans(records: list[dict]) -> list[ReplayedPlan]:
                 "baseline_single_call_is_modelled", True
             )
             current.final_text = record.get("final_text", "")
+            current.assembled_text = record.get("assembled_text", "")
+            current.skipped_steps = [
+                tuple(pair) for pair in record.get("skipped_steps") or []
+            ]
             current.completed = True
             current = None
 

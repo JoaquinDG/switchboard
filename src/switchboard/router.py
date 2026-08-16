@@ -13,6 +13,10 @@ Design principles:
    decides, which is exactly what the gate existed to prevent.
 4. Costs are normalized on a log scale, because model prices span orders of
    magnitude and a linear scale would make cost dominate every decision.
+5. Quality is normalized against a fixed floor (UNKNOWN_CAPABILITY_PRIOR),
+   never against the observed candidates. A per-decision candidate range
+   makes the same model score differently depending who else is competing —
+   the same artifact already fixed for cost, reintroduced on another axis.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import math
 from dataclasses import dataclass, field
 
 from .policies import NoQualifiedModelError, Policy, Task
-from .registry import TIER_RANK, ModelSpec, Registry
+from .registry import TIER_RANK, UNKNOWN_CAPABILITY_PRIOR, ModelSpec, Registry
 
 _LATENCY_SCORE = {"fast": 1.0, "medium": 0.6, "slow": 0.2}
 
@@ -32,6 +36,11 @@ class ScoredModel:
 
     The breakdown is retained rather than collapsed to a total so a decision
     can be argued with: "it lost on latency, not quality" is debuggable.
+
+    ``*_component`` fields are always the normalized [0, 1] terms actually
+    multiplied by the policy's weights — ``quality_component`` included.
+    Raw capability is still one call away via ``spec.capability_for(task_type)``,
+    the same way ``est_cost_usd`` sits next to the normalized ``cost_component``.
     """
 
     spec: ModelSpec
@@ -87,6 +96,34 @@ def _cost_score(cost: float, min_cost: float, max_cost: float) -> float:
     return 1.0 - (val - lo) / (hi - lo)
 
 
+def _quality_score(capability: float) -> float:
+    """Stretch raw capability onto the range it actually varies over.
+
+    Capability is declared 0-1, but no honest catalog scores a real model
+    below UNKNOWN_CAPABILITY_PRIOR — that number *is* "we have no idea,"
+    so anything a catalog maintainer actually rates sits at or above it.
+    The working range is therefore [UNKNOWN_CAPABILITY_PRIOR, 1.0], not
+    [0, 1], while cost (log-scaled to the full catalog) and latency (three
+    discrete steps) both already use their full [0, 1] range. Used raw,
+    capability under-uses its axis: a weight of 0.85 on an axis that only
+    ever moves through ~0.3 of its nominal span buys a fraction of the
+    influence the number implies (ROADMAP item 1b).
+
+    ROADMAP item 1b also records why the obvious fix — min-max normalizing
+    against the *candidates actually being compared* — was tried and
+    rejected: on a narrow catalog it turns a real 0.10 spread into a full
+    0-to-1 swing, and a task's candidate set is exactly the thing that
+    changes from one routing call to the next, so the same models could
+    score differently against each other depending who else showed up.
+    Anchoring on UNKNOWN_CAPABILITY_PRIOR instead of the observed
+    candidate range fixes that: the floor is a fixed catalog-wide constant,
+    not a function of who is competing this time, so it does not
+    reintroduce the candidate-count artifact already fixed for cost.
+    """
+    floor = UNKNOWN_CAPABILITY_PRIOR
+    return max(0.0, (capability - floor) / (1.0 - floor))
+
+
 def _highest_tier(models: list[ModelSpec]) -> list[ModelSpec]:
     """The subset sitting in the most capable tier present."""
     best = max(TIER_RANK.get(m.tier, 0) for m in models)
@@ -113,17 +150,17 @@ def score_models(
     scored: list[ScoredModel] = []
     for spec in candidates:
         cost = estimate_cost(task, spec)
-        quality = spec.capability_for(task.task_type)
+        quality_s = _quality_score(spec.capability_for(task.task_type))
         cost_s = _cost_score(cost, min_cost, max_cost)
         latency_s = _LATENCY_SCORE[spec.latency]
         if task.needs_fast_response and spec.latency == "slow":
             latency_s = 0.0
         total = (
-            policy.quality_weight * quality
+            policy.quality_weight * quality_s
             + policy.cost_weight * cost_s
             + policy.latency_weight * latency_s
         )
-        scored.append(ScoredModel(spec, total, quality, cost_s, latency_s, cost))
+        scored.append(ScoredModel(spec, total, quality_s, cost_s, latency_s, cost))
 
     scored.sort(key=lambda s: s.score, reverse=True)
     return scored
@@ -222,7 +259,8 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
         f"policy={policy.name}",
         f"task_type={task.task_type}",
         f"complexity={task.complexity:.2f}" + "".join(f" ({g})" for g in gates),
-        f"chose {top.spec.model_id}: quality={top.quality_component:.2f}, "
+        f"chose {top.spec.model_id}: quality={top.spec.capability_for(task.task_type):.2f} "
+        f"(score {top.quality_component:.2f}), "
         f"cost=${top.est_cost_usd:.4f} (score {top.cost_component:.2f}), "
         f"latency={top.spec.latency}",
     ]

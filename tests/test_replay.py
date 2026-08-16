@@ -275,3 +275,72 @@ class PlanLevelAuditTests(ReplayHarness):
         self.assertTrue(all(s.result.verified for s in live.steps))
         self.assertFalse(live.final_audit.passed)
         self.assertFalse(live.verified)
+
+
+class FailurePropagationTests(ReplayHarness):
+    """A step whose input was already judged wrong consumes it as ground truth."""
+
+    class FailFirstStep:
+        """s1's audit fails; anything downstream would build on its output."""
+
+        name = "mock"
+
+        def __init__(self):
+            self.generations = 0
+
+        def complete(self, model_id, prompt, max_tokens=1024):
+            from switchboard import Completion
+
+            if "You are auditing" in prompt:
+                bad = "POISONED" in prompt
+                verdict = ('{"pass": false, "score": 0.1, "issues": ["wrong"]}' if bad
+                           else '{"pass": true, "score": 0.9, "issues": []}')
+                return Completion(verdict, model_id, 20, 20)
+            self.generations += 1
+            if "Extract" in prompt and "OUTPUT OF STEP" not in prompt:
+                return Completion("POISONED: prices are all $1", model_id, 20, 40)
+            return Completion("downstream output", model_id, 20, 40)
+
+    def test_dependents_of_a_failed_step_are_skipped_by_default(self):
+        provider = self.FailFirstStep()
+        live, _, _ = self.run_plan_traced(provider=provider)
+        self.assertTrue(live.skipped_steps)
+        self.assertEqual(live.skipped_steps[0][0], "s2")
+        self.assertIn("did not verify", live.skipped_steps[0][1])
+
+    def test_skipping_stops_the_spend(self):
+        # Measured before the fix: 58% of a run's cost landed after the
+        # failure was already known.
+        from switchboard import Policy
+
+        halting, _, _ = self.run_plan_traced(provider=self.FailFirstStep())
+        everything, _, _ = self.run_plan_traced(
+            provider=self.FailFirstStep(),
+            policy=Policy("all", 0.5, 0.3, 0.2, plan_halt_dependents_on_failure=False),
+        )
+        self.assertLess(halting.routed_cost_usd, everything.routed_cost_usd)
+        self.assertTrue(halting.skipped_steps)
+        self.assertEqual(everything.skipped_steps, [])
+
+    def test_a_plan_with_skipped_steps_is_never_verified(self):
+        live, _, _ = self.run_plan_traced(provider=self.FailFirstStep())
+        self.assertFalse(live.verified)
+
+    def test_skips_survive_replay(self):
+        live, (rep,), _ = self.run_plan_traced(provider=self.FailFirstStep())
+        self.assertEqual(
+            [list(pair) for pair in live.skipped_steps],
+            [list(pair) for pair in rep.skipped_steps],
+        )
+
+    def test_opting_out_runs_every_step(self):
+        # A partial answer from a later step is sometimes useful on its own.
+        from switchboard import Policy
+
+        live, _, _ = self.run_plan_traced(
+            provider=self.FailFirstStep(),
+            policy=Policy("all", 0.5, 0.3, 0.2, plan_halt_dependents_on_failure=False),
+        )
+        self.assertEqual(live.skipped_steps, [])
+        # Every planned step ran, however many the planner produced.
+        self.assertEqual(len(live.steps), len(live.plan.steps))
