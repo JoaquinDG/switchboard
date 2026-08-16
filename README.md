@@ -20,6 +20,44 @@ PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_c
 
 Nothing here needs an API key, a network connection, or a build step.
 
+## Is this for me?
+
+**Switchboard is a library that sits between your code and the model vendors' APIs.** It is not an app, and it is not something you point at ChatGPT or Claude.
+
+**It probably helps you if** you are building something that calls LLM APIs, you get a per-token invoice at the end of the month, and that invoice is larger than you would like. That is the situation the whole design assumes: you are paying per call, so where each call lands is a decision worth making deliberately.
+
+**It probably does not help you if** you use ChatGPT, Claude, or Gemini through their own apps or subscriptions. There are two reasons, and the second is the real one:
+
+1. There is nowhere to stand. Those are finished products that choose their own models internally; nothing can get between you and them.
+2. **You are not paying per token.** A flat monthly subscription has no routing decision in it — sending a task to a cheaper model saves you nothing, because you are not charged for the expensive one either.
+
+If a friend showed you this and you are wondering how to use it: you probably do not want to. The person Switchboard helps is whoever *built* the app you are using, and who sees the bill.
+
+```
+you  ->  someone's app  ->  [ SWITCHBOARD ]  ->  Anthropic / OpenAI / Google / DeepSeek / Kimi
+                              ^ here                        ^ per-token billing lives here
+```
+
+Today the integration is a Python import. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
+
+### The limit worth knowing before you adopt it
+
+**Switchboard routes one task to one model. It does not split a request into parts.** That matters more than it sounds, because the savings depend on the split having already happened.
+
+Give it a real-world sentence and it routes on the *hardest* thing in there, so everything runs at frontier prices:
+
+| | Model | Est. cost |
+|---|---|---|
+| *"Pull the pricing from these pages, summarise it, recommend a response, and write the copy"* as **one** task | `claude-opus-5` | **$0.1600** |
+| The same work as **four** tasks | flash / flash / opus-5 / gemini-flash | **$0.0545** |
+
+**2.9x.** The extraction that could have run at $0.28 per million output tokens runs at $25 instead.
+
+Worse, triage does not notice. Asked to classify *"Read this contract, extract the payment terms, and tell me if we should sign it"*, it answers `extraction, complexity 0.30` with **confidence 1.00** — confidently wrong, since the hard part is the judgement call at the end. The confidence gate does not save it either: that gate guards against *no signal*, and a composite prompt hits a strong keyword and reports full confidence.
+
+So `examples/agentic_workflow.py` hand-writes its five steps, and that hand-splitting is doing real work the library does not do for you. Closing it is [ROADMAP](ROADMAP.md) item U3.
+
+
 ## What it looks like
 
 A five-step agentic pipeline dispatched through the **starter catalog** — 12 real models across 4 providers, at prices read from the vendors' own pages:

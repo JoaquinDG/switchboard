@@ -4,6 +4,10 @@ The working backlog, in priority order. **This file is the single source of trut
 
 Reorder freely. Add items freely. Tick a box when the work lands on `main`.
 
+**Claimed items.** An item marked `[~]` and **CLAIMED** is being built right now
+in an interactive session. The scheduled agent must skip it and take the next
+unclaimed one, or two people build the same thing twice.
+
 ## How to read an item
 
 Each entry states **why it matters** (the gap it closes), **done looks like** (acceptance criteria), and where relevant a **trap** — a way of satisfying the letter of the item while making the repo worse. The traps are the important part. Most of these items have an easy wrong version.
@@ -17,6 +21,77 @@ These are not negotiable and apply to all work below:
 - Honest claims only. Estimated is never presented as measured; mocked is never presented as real.
 - New routing logic extends the rationale string and the ranked list. It never bypasses them.
 - One logical change per PR.
+
+---
+
+## Tier 0 — make it usable
+
+Added after a non-technical reader asked three questions the repo could not
+answer: *how do I use it, does it run in the background, and what if my task
+has several tasks inside it?* All three were fair. The first two are packaging
+problems; the third is a real hole in the thesis.
+
+### U1. Say who it is for — **DONE**
+- [x] README now opens with "Is this for me?", which states plainly that
+  Switchboard sits between *your code* and the vendor APIs, that a flat
+  subscription has no routing decision in it, and that a reader using
+  ChatGPT or Claude through their apps is not the user.
+- **Why it mattered:** the honest answer to "how do I use it" is sometimes
+  "you don't". A repo that trades on honesty should say so before someone
+  spends an afternoon finding out.
+
+### U2. OpenAI-compatible local proxy — `[~]` **CLAIMED**
+- [~] **Why it matters:** the integration today is "write Python and construct
+  a Registry". A proxy exposing `/v1/chat/completions` on localhost lets any
+  existing tool — an SDK, an editor, a framework — get routing, cross-lab
+  auditing and cost accounting by changing one base URL and no code. This is
+  the single largest adoption unlock available, and it costs no dependencies:
+  `http.server` is in the stdlib.
+- **Done looks like:** `switchboard serve`; a request to `/v1/chat/completions`
+  routes through triage + router + broker and returns an OpenAI-shaped
+  response; routing rationale and cost returned in headers or an extension
+  field; `/v1/models` lists the catalog. Offline test coverage with no sockets
+  to real vendors.
+- **Trap — auditing and streaming are incompatible.** You cannot audit a
+  response you have not finished receiving. Either refuse `stream: true`, or
+  serve it with audits disabled and say so in the response. Silently dropping
+  verification while still reporting success would be the worst option, and it
+  is the easy one.
+- **Second trap:** auditing doubles latency, which is fine in a batch job and
+  unusable in an editor. Default audits **off** in the proxy and make them
+  opt-in per request; the library default stays on.
+
+### U3. Composite tasks — decomposition
+- [ ] **Why it matters:** measured, not hypothesised. Switchboard routes one
+  task to one model, so a composite request routes at its *hardest* sub-task
+  and everything runs at frontier prices: the four-part example in the README
+  costs **$0.1600 as one task vs $0.0545 as four — 2.9x**. Triage does not
+  catch it either. "Read this contract, extract the payment terms, and tell me
+  if we should sign it" classifies as `extraction, complexity 0.30` with
+  **confidence 1.00**, and the confidence gate cannot help because it guards
+  against *no signal*, not *several signals*. The headline savings therefore
+  depend on a decomposition the library does not perform — `agentic_workflow.py`
+  hand-writes its five steps.
+- **Done looks like:** a `Plan` layer that splits a request into steps, routes
+  each one, threads outputs between them, and reports the plan alongside the
+  result. Measured against routing the same request whole.
+- **Trap:** keep it out of the router. The router routes; planning is a
+  separate concern with a different failure mode, and folding them together
+  makes both untestable.
+- **Second trap:** an LLM planner is unreliable in exactly the way triage is,
+  so it gets the same treatment — show the plan, name the layer that produced
+  it, and let the caller approve or override before anything is spent.
+- **Third:** a step-wise plan also makes audits cheaper to repair. One verdict
+  on a four-part answer fails the whole thing for one bad part and re-runs
+  everything; per-step audits repair only the step that failed.
+
+### U4. A one-line CLI
+- [ ] **Why it matters:** `switchboard "prompt"` is a 30-second first
+  experience. Today the shortest path to seeing it work on your own prompt is
+  writing a script.
+- **Done looks like:** a console entry point that triages, routes, runs and
+  prints the rationale and cost. Dry-run by default, consistent with
+  `live_run.py`.
 
 ---
 
