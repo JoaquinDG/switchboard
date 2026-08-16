@@ -365,3 +365,39 @@ class TracingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputCeilingTests(unittest.TestCase):
+    """Three separate truncation incidents in one session say the protocol's
+    1024 default is too low once thinking tokens come out of the same budget."""
+
+    class Recorder:
+        name = "mock"
+
+        def __init__(self):
+            self.ceilings = []
+
+        def complete(self, model_id, prompt, max_tokens=1024):
+            from switchboard import Completion
+
+            self.ceilings.append(max_tokens)
+            if "You are auditing" in prompt:
+                return Completion(PASS_VERDICT, model_id, 10, 10)
+            return Completion("output", model_id, 10, 10)
+
+    def test_the_policy_ceiling_reaches_generation_and_audit(self):
+        provider = self.Recorder()
+        policy = Policy("wide", 0.5, 0.3, 0.2, max_output_tokens=4321)
+        Broker(demo_registry(), ProviderPool([provider]), policy).run(
+            Task(prompt="x", task_type="summarization"))
+        self.assertTrue(provider.ceilings)
+        self.assertTrue(all(c == 4321 for c in provider.ceilings), provider.ceilings)
+
+    def test_the_default_clears_the_observed_truncation_points(self):
+        # deepseek-v4-flash emitted zero characters at 1024 and valid JSON at
+        # 3000; claude-opus-5 spent 340 of 400 output tokens thinking.
+        self.assertGreaterEqual(BALANCED.max_output_tokens, 2_000)
+
+    def test_a_zero_ceiling_is_refused(self):
+        with self.assertRaises(ValueError):
+            Policy("bad", 0.5, 0.3, 0.2, max_output_tokens=0)

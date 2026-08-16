@@ -174,6 +174,37 @@ class HTTPRetryTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 provider.complete("m", "hi")
 
+    def test_connection_reset_is_typed_and_retried(self):
+        # Regression, found live: a reset mid-response is an OSError but not a
+        # URLError, so it escaped untyped, skipped this retry loop AND the
+        # broker's failover, and killed the whole run.
+        provider = self.make(max_retries=1)
+        with mock.patch(
+            "switchboard.providers.http.urllib.request.urlopen",
+            side_effect=[ConnectionResetError(54, "Connection reset by peer"),
+                         FakeResponse(ANTHROPIC_OK)],
+        ) as urlopen:
+            self.assertEqual(provider.complete("m", "hi").text, "hello")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_a_persistent_reset_surfaces_as_unavailable(self):
+        provider = self.make(max_retries=1)
+        with mock.patch(
+            "switchboard.providers.http.urllib.request.urlopen",
+            side_effect=ConnectionResetError(54, "Connection reset by peer"),
+        ):
+            with self.assertRaises(ProviderUnavailable):
+                provider.complete("m", "hi")
+
+    def test_broken_pipe_is_also_an_availability_failure(self):
+        provider = self.make(max_retries=0)
+        with mock.patch(
+            "switchboard.providers.http.urllib.request.urlopen",
+            side_effect=BrokenPipeError(32, "Broken pipe"),
+        ):
+            with self.assertRaises(ProviderUnavailable):
+                provider.complete("m", "hi")
+
     def test_timeout_is_typed_as_timeout(self):
         provider = self.make(max_retries=0)
         with mock.patch(

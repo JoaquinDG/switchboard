@@ -1,20 +1,72 @@
 # Switchboard
 
 [![CI](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21953772.svg)](https://doi.org/10.5281/zenodo.21953772)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **An LLM model brokerage: route every task to the most efficient model, let models audit each other, and account for what it cost.**
+
+📄 **White paper:** [Stop Sending Everything to the Smartest Model: Policy-Based LLM Routing with Cross-Model Auditing](https://zenodo.org/records/21953773) — Diaz Gutierrez de Quijano, J. (2026). Zenodo. [doi:10.5281/zenodo.21953772](https://doi.org/10.5281/zenodo.21953772)
 
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 221 tests
-PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
+PYTHONPATH=src python3 -m unittest discover -s tests   # 313 tests
+PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
 PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json
 ```
 
 Nothing here needs an API key, a network connection, or a build step.
+
+## Is this for me?
+
+**Switchboard is a library that sits between your code and the model vendors' APIs.** It is not an app, and it is not something you point at ChatGPT or Claude.
+
+**It probably helps you if** you are building something that calls LLM APIs, you get a per-token invoice at the end of the month, and that invoice is larger than you would like. That is the situation the whole design assumes: you are paying per call, so where each call lands is a decision worth making deliberately.
+
+**It probably does not help you if** you use ChatGPT, Claude, or Gemini through their own apps or subscriptions. There are two reasons, and the second is the real one:
+
+1. There is nowhere to stand. Those are finished products that choose their own models internally; nothing can get between you and them.
+2. **You are not paying per token.** A flat monthly subscription has no routing decision in it — sending a task to a cheaper model saves you nothing, because you are not charged for the expensive one either.
+
+If a friend showed you this and you are wondering how to use it: you probably do not want to. The person Switchboard helps is whoever *built* the app you are using, and who sees the bill.
+
+```
+you  ->  someone's app  ->  [ SWITCHBOARD ]  ->  Anthropic / OpenAI / Google / DeepSeek / Kimi
+                              ^ here                        ^ per-token billing lives here
+```
+
+Today the integration is a Python import. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
+
+### Compound requests: what decomposition is actually for
+
+**Switchboard routes one task to one model.** `Broker.run_plan()` will decompose a compound request first — but the reason turned out not to be the one I expected, and the eval is what corrected it.
+
+Routing a compound request whole means routing it at whatever the classifier makes of the *whole sentence*. Measured across 12 labeled compound requests (`evals/planner_eval.py`):
+
+| | Cost |
+|---|---|
+| Routed whole, as the classifier actually labels it | $0.1280 |
+| Routed whole, labelled at its **hardest** sub-task | $0.2400 |
+| Routed as a **plan** | $0.1460 |
+
+Read the first two rows together. Routing whole is cheap **because it misclassifies**: the request gets labelled by its dominant verb, lands on a small model, and the hard sub-task is never sent anywhere qualified. In **5 of 12 cases (42%)** the whole-request route landed a tier below what its hardest step needs — and the qualification gate cannot catch it, because the whole request looks like an easy extraction.
+
+*"1. Extract the payment terms. 2. Summarize the obligations. 3. Recommend whether we should sign"* classifies whole as `extraction`, routes to the small model, and costs $0.0032. The plan costs $0.0103 and sends the "should we sign" step to a model rated for it. The cheap version was never doing that work properly.
+
+So: **decomposition is a correctness mechanism first and a cost mechanism second.** Against a *correct* single call it is 1.6x cheaper; against the cheap mislabelled one it is 0.9x — more expensive, and worth it. The saving only shows up when the compound request was going to be labelled hard anyway, which on this set was 7 cases in 12.
+
+The planner is biased hard **against** splitting for the same reason: over-splitting buys extra calls, extra audits and extra latency for work that needed one call. False-split rate on 10 negatives is **0%**, it gates CI, and the negatives include the hardest one — long but single-task, because length is not structure.
+
+```python
+result = broker.run_plan(
+    "Extract the pricing from these pages, then summarise it, then recommend a response."
+)
+result.plan.describe()   # "plan: 3 steps (heuristic, confidence 0.75)"
+result.verified          # True only if every step passed its own audit
+```
 
 ## What it looks like
 
@@ -33,7 +85,7 @@ costs:   estimated at each step's declared token volumes, at real catalog prices
    -> dispatched to claude-opus-5 (frontier, anthropic), est. $0.0475
    -> audited by gpt-5.6-sol (cross-lab)
    -> verified: True
-   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95 (score 0.90), cost=$0.0475 (score 0.14), latency=slow
+   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95, cost=$0.0475 (score 0.14), latency=slow
 
 ==============================================================================
 DISPATCH PLAN SUMMARY
@@ -95,9 +147,9 @@ Two things fall out of that table.
 
 **`quality_first` routed to mid-tier models, not frontier.** Not a router bug — a scale bug in the weights. Cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. On this catalog capability spans 0.78-0.90 for extraction, so an 0.85 quality weight buys 0.102 of influence while an 0.10 latency weight buys 0.080. On `reasoning@0.6`, `claude-opus-5`'s 0.093 quality advantage loses to `gemini-3.7-flash`'s 0.080 latency advantage.
 
-The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis. The finding and the failed fix are both recorded in [ROADMAP.md](ROADMAP.md) item 1b.
+The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis.
 
-**Since fixed.** Capability now normalizes against `UNKNOWN_CAPABILITY_PRIOR` (0.5) — a fixed catalog-wide constant, not the observed range of whichever candidates happen to be competing for a given task — instead of staying raw. No honest catalog rates a real model below "we have no idea," so 0.5-1.0 is capability's real working range, the same way cost is already log-scaled and latency already spans its three tiers. `quality_first` on `reasoning@0.6` now picks `claude-opus-5` over `gemini-3.7-flash` on the starter catalog, and the narrow demo catalog still keeps easy extraction cheap under `cost_first` — the case the rejected fix broke. The table above is left as originally measured rather than restated with numbers nobody re-ran live; the fix is covered offline in `tests/test_router.py::QualityScoreScaleTests` and `evals/routing_eval.py`.
+**Since fixed, by a different route.** Capability now normalizes against `UNKNOWN_CAPABILITY_PRIOR` (0.5) — a fixed catalog-wide constant, *not* the observed range of whichever candidates happen to be competing on a given call. No honest catalog rates a real model below "we have no idea", so 0.5–1.0 is capability's actual working range, the same way cost is already log-scaled and latency already spans its three tiers. Because the floor does not depend on who else showed up, it cannot reintroduce the candidate-count artifact that killed the first attempt. `quality_first` on `reasoning@0.6` now picks `claude-opus-5`, and the narrow demo catalog still keeps easy extraction on the small model — the case the rejected fix broke. The table above is left as originally measured rather than restated with numbers nobody re-ran live.
 
 ### Finding 4: verification, not inference, dominates the bill
 
@@ -198,7 +250,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 221 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 313 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -227,6 +279,86 @@ Integration tests are opt-in twice over — `SWITCHBOARD_LIVE_TESTS=1` **and** t
 ```bash
 SWITCHBOARD_LIVE_TESTS=1 PYTHONPATH=src python3 -m unittest tests.test_live
 ```
+
+## Compound requests: the planner
+
+```bash
+PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json --plan
+```
+
+One sentence in, a routed and audited pipeline out:
+
+```
+request: Pull the competitor pricing out of these five saved pages, then summarise the
+         findings into a comparison brief, then recommend our pricing response with
+         tradeoffs, and finally write the new landing page copy.
+
+plan: 4 steps (heuristic, confidence 0.75)
+  s1 extraction     cx=0.3   -> deepseek-v4-flash   no upstream context     verified=True
+  s2 summarization  cx=0.3   -> deepseek-v4-flash   <- s1 (88c)             verified=True
+  s3 reasoning      cx=0.65  -> deepseek-v4-pro     <- s2 (111c)            verified=True
+  s4 creative       cx=0.45  -> deepseek-v4-flash   <- s3 (109c)            verified=True
+
+  routed:              $0.00414
+  best model per step: $0.00506
+  one frontier call:   $0.08380  on claude-opus-5  (MODELLED, not run)
+```
+
+That is the pipeline `examples/agentic_workflow.py` used to hand-write, inferred from prose. Run it without `--plan` to compare.
+
+### Two layers, gated on confidence
+
+Same architecture as triage, for the same reason. The **heuristic** is free, offline, deterministic and splits on explicit structure only — enumeration, ordinals, sequence connectives. Comma chains are not structure ("extract names, emails and phone numbers" is one extraction) and neither is length.
+
+Where several kinds of work are named but nothing marks the seams, it **declines to split and reports low confidence** rather than guessing. That is what opens the gate to the **model layer**, which runs on the cheapest model in the catalog, gets exactly one repair attempt if its JSON fails validation, and falls back to the heuristic on any failure.
+
+`planned_by` names the layer that actually decided. A model call that produced nothing usable is credited to the heuristic that rescued it, and the plan it wasted money on is reported in `discarded_attempts` rather than quietly absorbed.
+
+### Measured: what the model layer is worth
+
+`examples/planner_ab.py`, 24 labeled requests against live APIs:
+
+| | false splits | coverage | unmarked compounds | model calls | cost |
+|---|---|---|---|---|---|
+| Heuristic only | 0/10 | 11/14 | **0/2** | 0 | free |
+| **Gated at 0.25** | 0/10 | 12/14 | **1/2** | 1 | $0.00010 |
+| Model always | 0/10 | 13/14 | **2/2** | 24 | $0.00246 |
+
+Two things this settled.
+
+**The model layer never over-splits.** Zero false splits at every threshold, which was the risk worth checking — a planner that splits eagerly is the failure mode that costs money silently.
+
+**Confidence gating is bounded by the heuristic's self-knowledge, and here that bound bites.** For triage, confidence was a *perfect* separator: every wrong classification scored exactly 0.00. For the planner it is not. Of two genuinely compound requests with no structure to cut on:
+
+- *"Read this contract, extract the payment terms, and tell me if we should sign it"* → confidence **0.20**. The heuristic knows it cannot judge, the gate opens, the model splits it correctly.
+- *"Take these support tickets, work out which themes are growing, write me something I can send"* → confidence **0.95**. Confidently wrong. No connective, and the phrasings ("work out", "write me something") match none of the work-verb patterns, so it sees one job. **The gate never opens.**
+
+A blind spot is worse than a known unknown: gating cannot rescue a case the heuristic is confident about. That is why the unmarked compounds are scored separately in the eval rather than folded into coverage — the number that matters there is not "did it split" but "did it know it couldn't tell".
+
+Latency, not money, is the reason the gate is worth having: **13s per model plan**, so always-asking costs 312s across the set to gain one case over the gate's one call.
+
+### Biased against splitting
+
+Over-splitting is the expensive error: extra calls, extra audits, extra latency, on work that needed one call. **False-split rate is 0% on 10 negatives and gates CI.** The negatives include the hardest one — long but single-task.
+
+### Execution
+
+Steps run in dependency order, each dispatched through `Broker.run()` **unchanged**: nothing bypasses triage, the gates, auditing, escalation or failover. A dependent step gets its predecessor's output under a labelled fence, and the routing estimate is re-derived at dispatch because injected context is real input someone pays for. Truncation at `Policy.plan_context_cap_chars` is **named in the trace**, never swallowed.
+
+If a step fails its audit, the steps that **depend** on it are skipped rather than run against rejected input — 58% of a failing run's spend used to land after the failure was already known. Independent steps still run, and `result.skipped_steps` names each skip and why. Set `Policy.plan_halt_dependents_on_failure=False` when a later step's partial answer is useful on its own.
+
+`result.verified` means every step passed its own audit. That is not the same as the assembled answer being coherent — set `Policy.plan_final_audit=True` for one extra audit of the assembled result against the *original* request, which is the only check that can see whether the pipeline answered the question it was asked.
+
+### Replay
+
+Everything needed to reconstruct a plan run is in the trace — the plan, the dispatch order, what context went into which step, per-step outcomes, and the totals:
+
+```python
+from switchboard.replay import read_trace, replay_plans
+plans = replay_plans(read_trace("traces/workflow.jsonl"))
+```
+
+Proven by a side-by-side test that runs a plan, discards the objects, and compares the rebuild field by field. Plan events carry an `"event"` key; the per-task records that predate them do not and are unchanged, so old traces stay readable.
 
 ## Task-type inference
 
@@ -318,7 +450,26 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 12. **A vendor listed a model it no longer serves.** `gemini-2.5-flash-lite` appeared in `/models` and returned `404 no longer available` at the chat endpoint, so the free listing check passed it. `live_check.py --probe` now makes a real 16-token call per model, and distinguishes retired from rate-limited. Its own first version used a 1-token budget and reported OpenAI's reasoning models as broken — a false negative with the same root cause as the truncation bug.
 
 11. **A token ceiling was being misdiagnosed as poor quality.** The adapters discarded `stop_reason`, so an answer cut off at `max_tokens` looked identical to a complete bad one. A reasoning model that spent 340 of 400 output tokens thinking returned almost nothing, failed its audit as "empty", and triggered a paid escalation to a model that would truncate at the same ceiling. Raising the ceiling took the suite from 3/5 verified with 2 escalations to 4/5 with 1. Truncation is now carried on `Completion.truncated`, named by the auditor before any quality finding, and surfaced on `BrokerResult`.
-14. **`quality_first` wasn't quality-first.** Raw capability clusters near the top of [0, 1] (0.78-0.95 on a real catalog) while cost and latency both use their full range, so an 0.85 quality weight bought less real influence than an 0.10 latency weight on close calls — measured live in Finding 3 below. The first fix tried (min-max normalize capability like cost) was rejected on the spot: it breaks narrow catalogs the same way candidate-only cost normalization once did. The fix that shipped anchors on `UNKNOWN_CAPABILITY_PRIOR`, a fixed constant, instead of the observed candidates — see ROADMAP item 1b.
+
+14. **Decomposition is not primarily a cost optimisation.** The planner was built on a measured 2.9x — a compound request routed whole costs 2.9x the same work routed as four steps. The planner eval then showed that figure assumes the whole request is *correctly labelled hard*. In practice the classifier labels a compound request by its dominant verb, so routing it whole is often **cheaper** — because it silently under-routes. On 12 labeled compound requests the whole-request route landed below its hardest sub-task's required tier **42% of the time**, which the qualification gate cannot catch since the request looks easy. Decomposition's first-order benefit is surfacing that hard step, not saving money; against a *correct* single call it is 1.6x cheaper, against the mislabelled one 0.9x.
+
+15. **The planner silently dropped part of the request.** Splitting on `then` produced a two-word fragment, and a minimum-length filter discarded it — so "extract the pricing, then summarize it, then recommend a response" planned three steps' worth of intent into two and never summarised anything. Short fragments now merge into a neighbour.
+
+16. **Caller-supplied token estimates were discarded on split.** A request declared at 12k input tokens planned as steps of ~120, so the router priced a large job as a trivial one. Found because the eval's cost comparison produced an impossible number and the estimator, not the economics, turned out to be what it was measuring.
+
+17. **The planner's model layer was 100% broken by truncation, and said "malformed JSON".** Every one of 10 rejected model plans was the same failure found earlier in the adapters: a reasoning model spending its whole `max_tokens` budget thinking and returning zero visible characters. At the 1024 default, `deepseek-v4-flash` emitted **0 characters**; at 3000 it produced valid JSON in 655 output tokens. Worse, the code then spent a *repair* attempt that would truncate identically — the same waste as escalating a truncated answer to a bigger model. Planning now runs with headroom, reports truncation as truncation, and does not retry it. Rejections went from 10 to 0.
+
+18. **Confidence gating is only as good as the heuristic's self-knowledge.** Triage's confidence was a perfect separator of its own errors. The planner's is not: of two unmarked compound requests, one scored 0.20 (gate opens, model rescues it) and one scored 0.95 while being wrong (gate stays shut). Same mechanism, different reliability — which is an argument for measuring a gate on every classifier that uses one, rather than assuming the property transfers.
+
+19. **The plan had no assembly step, and the plan-level audit caught it.** Running a decomposed pipeline against live models, the final audit scored **0.15** and complained the answer *"skips the first requested step entirely"*. It was right, and the bug was mine: `PlanResult.final_text` was only the **last** step's output, so a request asking for three deliverables was audited against one third of its answer. Added `assembled_text` — every step's output, labelled — and pointed the audit at it. Same request, same models: **0.15 → 0.85, passed.** The audit then produced real critique instead (cannibalisation risk, storage dropped from the exposure analysis) — the kind no per-step audit can see, which is the entire argument for having it.
+
+20. **A connection reset escaped the type system and killed a whole run.** `ConnectionResetError` is an `OSError` but *not* a `URLError`: urllib wraps failures during connection *setup*, while a reset mid-response surfaces raw. So it bypassed the adapter's retry loop **and** the broker's failover — precisely the two mechanisms built to survive it — and took a live plan down mid-audit. A dropped connection is the most ordinary transient failure there is. Now typed as `ProviderUnavailable` and retried.
+
+21. **The default output ceiling was too low, three separate times.** The `Provider` protocol defaults to 1024 tokens, and reasoning models spend thinking tokens from that same budget before emitting anything. Measured: `claude-opus-5` spent 340 of 400; `deepseek-v4-flash` emitted **zero characters** at 1024 and valid JSON at 3000. It surfaced once as a fake quality failure, once as "malformed JSON" from the planner, and once as a truncated pipeline step. Now `Policy.max_output_tokens`, defaulting to 2000, applied to every generation and audit call. Three incidents from one root cause is a default, not a coincidence.
+
+22. **A plan kept building on a step it had already rejected.** When a step failed its audit, every dependent step still ran — consuming the rejected output as ground truth and producing a confidently worded answer built on it. Measured: **58% of a run's spend happened after the failure was already known.** Dependents of a failed step are now skipped by default (`Policy.plan_halt_dependents_on_failure`), with the reason recorded per step and carried through replay. Independent steps still run: only dependents are poisoned. Same information, 58% less money, and the gap in the answer is explicit instead of papered over.
+
+23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
 
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
@@ -384,14 +535,18 @@ src/switchboard/
   policies.py        Task + Policy: the explicit tradeoff
   triage.py          bare prompt -> task_type + complexity, always labeled by layer
   prompts.py         audit + retry prompt text, single owner, no test-only markers
+  planner.py         compound request -> Plan; anti-split heuristic + gated model layer
+  replay.py          rebuild a whole plan run from the trace alone
   router.py          gates -> scoring -> explained decision (+ warnings)
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               221 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
-evals/               9 routing scenarios + 40 labeled triage prompts (tuned and held-out)
-examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
+tests/               313 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
+examples/            quickstart, agentic workflow (--plan), live_check/live_run,
+                     triage_ab/planner_ab, catalogs
+CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"
 ```
 
 ## Changelog
@@ -411,4 +566,33 @@ examples/            quickstart, agentic workflow, live_check/live_run/triage_ab
 - HTTP retries with jittered backoff and typed errors; `max_completion_tokens` vs `max_tokens` by base URL
 - Catalog validated on load with errors naming the offending entry; `ScriptedProvider` / `FlakyProvider`; `py.typed`; CI on 3.10–3.13
 
-MIT licensed.
+## Citing this work
+
+The paper describes the design; this repository is the implementation and the
+measurements. Both are citable.
+
+> Diaz Gutierrez de Quijano, J. (2026). *Stop Sending Everything to the Smartest
+> Model: Policy-Based LLM Routing with Cross-Model Auditing.* Zenodo.
+> https://doi.org/10.5281/zenodo.21953772
+
+```bibtex
+@misc{diazgutierrezdequijano2026switchboard,
+  author       = {Diaz Gutierrez de Quijano, Joaquin},
+  title        = {Stop Sending Everything to the Smartest Model:
+                  Policy-Based LLM Routing with Cross-Model Auditing},
+  year         = {2026},
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.21953772},
+  url          = {https://doi.org/10.5281/zenodo.21953772},
+  note         = {Preprint. Code: https://github.com/JoaquinDG/switchboard}
+}
+```
+
+The badge and BibTeX use the **concept DOI** (`…772`), which always resolves to
+the newest version. To cite this exact release instead, use the version DOI
+[`10.5281/zenodo.21953773`](https://doi.org/10.5281/zenodo.21953773).
+
+`CITATION.cff` carries the same metadata, so GitHub's "Cite this repository"
+button stays in step with the record.
+
+MIT licensed. The paper is CC BY 4.0.

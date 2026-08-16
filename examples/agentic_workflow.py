@@ -32,6 +32,14 @@ from switchboard import (
     mock_pool,
 )
 
+# The WORKFLOW below as a single sentence. `--plan` runs this through the
+# planner instead, so the two can be compared: hand-decomposed versus inferred.
+DEFAULT_COMPOUND_REQUEST = (
+    "Pull the competitor pricing out of these five saved pages, then summarise "
+    "the findings into a comparison brief, then recommend our pricing response "
+    "with tradeoffs, and finally write the new landing page copy."
+)
+
 # ---- EDIT ME: your workflow, one Task per step ------------------------------
 # task_type: reasoning / coding / summarization / extraction / creative
 # complexity: 0.0 (trivial) to 1.0 (very hard)
@@ -79,6 +87,40 @@ def best_model_for(registry: Registry, task: Task):
     return max(registry.all(), key=lambda m: m.capability_for(task.task_type))
 
 
+def run_planned(args, registry, provenance, policy) -> None:
+    """One sentence in, a routed and audited pipeline out."""
+    broker = Broker(registry, mock_pool(registry), policy, trace_path=args.trace)
+    print("=== Planned dispatch (one request, decomposed) ===")
+    print(f"catalog: {provenance}")
+    print(f"policy:  {policy.name}")
+    print(f"request: {args.plan}\n")
+
+    result = broker.run_plan(args.plan)
+    print(f"{result.plan.describe()}")
+    print(f"  {result.plan.rationale}\n")
+    for entry in result.steps:
+        chosen = registry.get(entry.result.final_model)
+        context = (f"<- {entry.injected_from[0]} ({entry.injected_chars}c"
+                   f"{', TRUNCATED' if entry.injected_truncated else ''})"
+                   if entry.injected_from else "no upstream context")
+        print(f"  {entry.step_id} {entry.step.task_type:<14} cx={entry.step.complexity:<5} "
+              f"-> {chosen.model_id:<24} {context}")
+        print(f"       verified={entry.result.verified}  ${entry.result.total_cost_usd:.5f}")
+    print()
+    print(f"  verified (every step): {result.verified}")
+    if result.final_audit is not None:
+        print(f"  plan-level audit:      {result.final_audit.passed} "
+              f"by {result.final_audit.auditor_model}")
+    print(f"  routed:                ${result.routed_cost_usd:.5f}")
+    print(f"  best model per step:   ${result.baseline_best_model_usd:.5f}")
+    print(f"  one frontier call:     ${result.baseline_single_call_usd:.5f}  "
+          f"on {result.baseline_single_call_model}  (MODELLED, not run)")
+    print()
+    print("  Execution is mocked; the routing, the plan and the prices are real.")
+    print("  Compare with the hand-written pipeline: run without --plan.")
+    print(f"  Full decision log, plan events included: {args.trace}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Dispatch an agentic workflow through Switchboard.",
@@ -95,10 +137,18 @@ def main() -> None:
     parser.add_argument(
         "--trace", default="traces/workflow.jsonl", help="where to append JSONL decision traces"
     )
+    parser.add_argument(
+        "--plan", metavar="REQUEST", nargs="?", const=DEFAULT_COMPOUND_REQUEST,
+        help="decompose ONE messy request instead of running the hand-written "
+             "WORKFLOW. Pass your own sentence, or omit the value to use the "
+             "built-in one, which is the hand-written pipeline as prose.",
+    )
     args = parser.parse_args()
 
     registry, provenance = load_registry(args.catalog)
     policy = PRESETS[args.policy]
+    if args.plan:
+        return run_planned(args, registry, provenance, policy)
     # One offline mock per provider the catalog names, so a real catalog
     # runs end to end — cross-lab audits included — without any API keys.
     broker = Broker(registry, mock_pool(registry), policy, trace_path=args.trace)
