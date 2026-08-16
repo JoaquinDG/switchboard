@@ -91,13 +91,25 @@ problems; the third is a real hole in the thesis.
   on a four-part answer fails the whole thing for one bad part and re-runs
   everything; per-step audits repair only the step that failed.
 
-### U4. A one-line CLI
-- [ ] **Why it matters:** `switchboard "prompt"` is a 30-second first
-  experience. Today the shortest path to seeing it work on your own prompt is
-  writing a script.
-- **Done looks like:** a console entry point that triages, routes, runs and
-  prints the rationale and cost. Dry-run by default, consistent with
-  `live_run.py`.
+### U4. A one-line CLI — **DONE**
+- [x] Shipped as `switchboard.cli:main`, wired up via `[project.scripts]` in
+  `pyproject.toml`. `switchboard "prompt"` triages (auto by default,
+  `--task-type` to skip it), routes, runs, and prints the rationale, verdict,
+  and full cost breakdown against the built-in demo catalog — no keys, no
+  script, no `PYTHONPATH` juggling once installed.
+- **How "dry-run by default" was read:** the default run executes the full
+  `Broker.run` pipeline (triage, routing, audit, escalation) against
+  `MockProvider`, so routing, auditing and cost accounting are the real
+  logic — only the generated text is canned, and the output says so.
+  Nothing is billed or sent over the network unless `--live` is passed, and
+  `--live` refuses to run without both a keyed provider and an explicit
+  `--budget-usd > 0`, mirroring `examples/live_run.py`'s worst-case cost
+  guard so a single mistyped flag can't produce a surprise bill.
+- **Tests:** `tests/test_cli.py` — default mocked run, forced `--task-type`
+  skips triage, custom catalog loading, opt-in tracing, and three
+  live-mode safety tests (no budget, no keys, budget of zero) that assert no
+  provider is ever touched, run with provider keys scrubbed from the
+  environment so the test can't pass by accident.
 
 ---
 

@@ -11,11 +11,13 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 302 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 312 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
 PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json
+
+pip install -e . && switchboard "extract the dates from this email"   # one-line CLI, no keys needed
 ```
 
 Nothing here needs an API key, a network connection, or a build step.
@@ -38,7 +40,7 @@ you  ->  someone's app  ->  [ SWITCHBOARD ]  ->  Anthropic / OpenAI / Google / D
                               ^ here                        ^ per-token billing lives here
 ```
 
-Today the integration is a Python import. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
+Today the integration is a Python import, or `switchboard "your prompt"` on the command line for a quick look with no code at all. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
 
 ### Compound requests: what decomposition is actually for
 
@@ -248,7 +250,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 302 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 312 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -527,8 +529,9 @@ src/switchboard/
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
+  cli.py             `switchboard "prompt"` console entry point: triage -> route -> run -> print
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               302 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               312 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring, CLI)
 evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
                      triage_ab/planner_ab, catalogs
