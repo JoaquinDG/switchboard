@@ -7,8 +7,8 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 216 tests
-PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
+PYTHONPATH=src python3 -m unittest discover -s tests   # 221 tests
+PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
 PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json
@@ -33,7 +33,7 @@ costs:   estimated at each step's declared token volumes, at real catalog prices
    -> dispatched to claude-opus-5 (frontier, anthropic), est. $0.0475
    -> audited by gpt-5.6-sol (cross-lab)
    -> verified: True
-   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95, cost=$0.0475 (score 0.14), latency=slow
+   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95 (score 0.90), cost=$0.0475 (score 0.14), latency=slow
 
 ==============================================================================
 DISPATCH PLAN SUMMARY
@@ -95,7 +95,9 @@ Two things fall out of that table.
 
 **`quality_first` routed to mid-tier models, not frontier.** Not a router bug — a scale bug in the weights. Cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. On this catalog capability spans 0.78-0.90 for extraction, so an 0.85 quality weight buys 0.102 of influence while an 0.10 latency weight buys 0.080. On `reasoning@0.6`, `claude-opus-5`'s 0.093 quality advantage loses to `gemini-3.7-flash`'s 0.080 latency advantage.
 
-The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis. The finding and the failed fix are both recorded in [ROADMAP.md](ROADMAP.md) item 1b rather than patched over.
+The obvious fix — normalize capability like cost — was prototyped and **rejected**: it works on a 16-model catalog and breaks on the 3-model demo one, where a 0.10 capability spread becomes a full 0-to-1 swing and `balanced` starts sending easy extraction to a frontier model. That is the same artifact already fixed for cost, reintroduced on another axis. The finding and the failed fix are both recorded in [ROADMAP.md](ROADMAP.md) item 1b.
+
+**Since fixed.** Capability now normalizes against `UNKNOWN_CAPABILITY_PRIOR` (0.5) — a fixed catalog-wide constant, not the observed range of whichever candidates happen to be competing for a given task — instead of staying raw. No honest catalog rates a real model below "we have no idea," so 0.5-1.0 is capability's real working range, the same way cost is already log-scaled and latency already spans its three tiers. `quality_first` on `reasoning@0.6` now picks `claude-opus-5` over `gemini-3.7-flash` on the starter catalog, and the narrow demo catalog still keeps easy extraction cheap under `cost_first` — the case the rejected fix broke. The table above is left as originally measured rather than restated with numbers nobody re-ran live; the fix is covered offline in `tests/test_router.py::QualityScoreScaleTests` and `evals/routing_eval.py`.
 
 ### Finding 4: verification, not inference, dominates the bill
 
@@ -196,7 +198,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 216 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 221 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -316,6 +318,7 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 12. **A vendor listed a model it no longer serves.** `gemini-2.5-flash-lite` appeared in `/models` and returned `404 no longer available` at the chat endpoint, so the free listing check passed it. `live_check.py --probe` now makes a real 16-token call per model, and distinguishes retired from rate-limited. Its own first version used a 1-token budget and reported OpenAI's reasoning models as broken — a false negative with the same root cause as the truncation bug.
 
 11. **A token ceiling was being misdiagnosed as poor quality.** The adapters discarded `stop_reason`, so an answer cut off at `max_tokens` looked identical to a complete bad one. A reasoning model that spent 340 of 400 output tokens thinking returned almost nothing, failed its audit as "empty", and triggered a paid escalation to a model that would truncate at the same ceiling. Raising the ceiling took the suite from 3/5 verified with 2 escalations to 4/5 with 1. Truncation is now carried on `Completion.truncated`, named by the auditor before any quality finding, and surfaced on `BrokerResult`.
+14. **`quality_first` wasn't quality-first.** Raw capability clusters near the top of [0, 1] (0.78-0.95 on a real catalog) while cost and latency both use their full range, so an 0.85 quality weight bought less real influence than an 0.10 latency weight on close calls — measured live in Finding 3 below. The first fix tried (min-max normalize capability like cost) was rejected on the spot: it breaks narrow catalogs the same way candidate-only cost normalization once did. The fix that shipped anchors on `UNKNOWN_CAPABILITY_PRIOR`, a fixed constant, instead of the observed candidates — see ROADMAP item 1b.
 
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
@@ -386,8 +389,8 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               216 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
-evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
+tests/               221 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+evals/               9 routing scenarios + 40 labeled triage prompts (tuned and held-out)
 examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
 ```
 
