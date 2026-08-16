@@ -16,6 +16,17 @@ from .policies import (
     Policy,
     Task,
 )
+from .planner import (
+    MAX_STEPS,
+    Plan,
+    PlanStep,
+    PlanValidationError,
+    no_split_plan,
+    parse_plan,
+    plan_heuristic,
+    topological_order,
+    validate_plan,
+)
 from .prompts import AUDIT_PROMPT_HEADER, ESCALATION_RETRY_TEMPLATE, build_retry_prompt
 from .providers.base import (
     Completion,
@@ -81,6 +92,10 @@ __all__ = [
     "MockProvider",
     "NoQualifiedModelError",
     "OpenAICompatibleProvider",
+    "MAX_STEPS",
+    "Plan",
+    "PlanStep",
+    "PlanValidationError",
     "PRESETS",
     "Policy",
     "Provider",
@@ -113,9 +128,14 @@ __all__ = [
     "key_status",
     "live_pool",
     "mock_pool",
+    "no_split_plan",
+    "parse_plan",
+    "plan_heuristic",
     "pick_auditor",
     "route",
+    "topological_order",
     "score_models",
     "triage_task",
     "usable_registry",
+    "validate_plan",
 ]

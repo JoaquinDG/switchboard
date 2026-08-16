@@ -1,0 +1,559 @@
+"""Compound-request decomposition: one messy sentence into routable steps.
+
+Switchboard routes one task to one model. Real requests are compound — "pull
+the competitor pricing, summarise it, then draft the new page" — and a
+compound request routed whole must route at its *hardest* sub-task, so the
+extraction runs at frontier prices along with everything else. Measured on the
+starter catalog that is 2.9x ($0.1600 as one task, $0.0545 as four). The
+savings the router exists to produce therefore depend on a decomposition the
+library did not perform; `examples/agentic_workflow.py` hand-writes its steps.
+
+**The planner proposes, the engine disposes.** Decomposition is a routing
+input, not a showcase. A planner that shreds a simple request into expensive
+confetti destroys the economics the router protects, so the bias runs hard
+*against* splitting: a request must show explicit multi-step structure to be
+split, and ambiguity resolves to no-split.
+
+Architecture mirrors `triage.py`, deliberately:
+
+1. **Heuristic** (default, offline, deterministic). Structural signals only —
+   enumeration and sequence connectives. Never length, never comma chains:
+   "extract names, emails and phone numbers" is one extraction task, and a
+   long prompt is not a compound one.
+2. **Model** (optional, gated). Consulted only when the heuristic's confidence
+   falls below the policy threshold, on the cheapest qualified model. Its
+   output passes the same strict validation, gets exactly one repair attempt,
+   and on any failure falls back to the heuristic's answer.
+
+The honesty rule carries over verbatim: `planned_by` names the layer that
+actually decided. A heuristic plan is never dressed up as a model's, and a
+model call that failed is credited to the heuristic that rescued it.
+
+The confidence signal is doing real work here. A request with several distinct
+imperative verbs but no explicit structure — "read this contract, extract the
+payment terms, and tell me if we should sign it" — is exactly where the
+heuristic should decline to split *and say it is unsure*, handing the decision
+to the model layer. That is the whole reason confidence is reported rather
+than a boolean.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field, replace
+
+from .triage import TASK_TYPES, classify_heuristic
+
+__all__ = [
+    "MAX_STEPS",
+    "Plan",
+    "PlanStep",
+    "PlanValidationError",
+    "no_split_plan",
+    "parse_plan",
+    "plan_heuristic",
+    "topological_order",
+    "validate_plan",
+]
+
+# A plan longer than this is a planner malfunction, not an ambitious request.
+# Bounding it keeps a runaway model from proposing a hundred billable steps.
+MAX_STEPS = 12
+
+# How planned_by reports a request that was deliberately not split.
+NOT_SPLIT = "none"
+
+
+class PlanValidationError(ValueError):
+    """A plan is structurally unusable. Callers fail closed to single-task."""
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """One routable unit of a decomposed request."""
+
+    step_id: str
+    prompt: str
+    task_type: str
+    complexity: float
+    est_input_tokens: int
+    est_output_tokens: int
+    # step_ids whose OUTPUT this step needs. Threaded in at dispatch time.
+    depends_on: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Plan:
+    """A decomposition, and an account of who produced it and why."""
+
+    request: str
+    steps: tuple[PlanStep, ...]
+    # "heuristic" | "model:<model_id>" | "none". Never a layer that did not
+    # actually decide — a failed model call is credited to the heuristic.
+    planned_by: str
+    confidence: float
+    rationale: str
+    signals: tuple[str, ...] = ()
+
+    @property
+    def is_split(self) -> bool:
+        """True when the request was actually decomposed."""
+        return len(self.steps) > 1
+
+    def describe(self) -> str:
+        """One line for a rationale string."""
+        if not self.is_split:
+            return f"plan: not split ({self.planned_by}), {self.rationale}"
+        return (
+            f"plan: {len(self.steps)} steps ({self.planned_by}, "
+            f"confidence {self.confidence:.2f})"
+        )
+
+
+# --------------------------------------------------------------------------
+# Validation — strict about meaning, tolerant about transport.
+# --------------------------------------------------------------------------
+
+
+def validate_plan(plan: Plan) -> None:
+    """Raise PlanValidationError unless the plan is structurally executable.
+
+    Deliberately unforgiving. A plan that half-parses is worse than none: it
+    spends money on steps derived from a shape nobody checked.
+    """
+    if not plan.request.strip():
+        raise PlanValidationError("plan has an empty request")
+    if not plan.steps:
+        raise PlanValidationError("plan has no steps")
+    if len(plan.steps) > MAX_STEPS:
+        raise PlanValidationError(
+            f"plan has {len(plan.steps)} steps, more than the {MAX_STEPS} cap; "
+            f"treating as a planner malfunction rather than an ambitious request"
+        )
+
+    seen: set[str] = set()
+    for index, step in enumerate(plan.steps, start=1):
+        expected = f"s{index}"
+        if step.step_id != expected:
+            raise PlanValidationError(
+                f"step ids must be contiguous s1..sN in order; "
+                f"position {index} is {step.step_id!r}, expected {expected!r}"
+            )
+        if step.step_id in seen:
+            raise PlanValidationError(f"duplicate step id {step.step_id!r}")
+        seen.add(step.step_id)
+
+        if not step.prompt.strip():
+            raise PlanValidationError(f"{step.step_id}: empty prompt")
+        if step.task_type not in TASK_TYPES:
+            raise PlanValidationError(
+                f"{step.step_id}: unknown task_type {step.task_type!r}; "
+                f"known: {sorted(TASK_TYPES)}"
+            )
+        if not isinstance(step.complexity, (int, float)) or isinstance(step.complexity, bool):
+            raise PlanValidationError(f"{step.step_id}: complexity must be a number")
+        if not 0.0 <= step.complexity <= 1.0:
+            raise PlanValidationError(
+                f"{step.step_id}: complexity {step.complexity} outside [0, 1]"
+            )
+        for label, value in (
+            ("est_input_tokens", step.est_input_tokens),
+            ("est_output_tokens", step.est_output_tokens),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise PlanValidationError(
+                    f"{step.step_id}: {label} must be a non-negative int, got {value!r}"
+                )
+
+    ids = {s.step_id for s in plan.steps}
+    for step in plan.steps:
+        for dep in step.depends_on:
+            if dep == step.step_id:
+                raise PlanValidationError(f"{step.step_id} depends on itself")
+            if dep not in ids:
+                raise PlanValidationError(
+                    f"{step.step_id} depends on {dep!r}, which is not a step in this plan"
+                )
+        if len(set(step.depends_on)) != len(step.depends_on):
+            raise PlanValidationError(f"{step.step_id} lists a dependency twice")
+
+    topological_order(plan)  # raises on a cycle
+
+
+def topological_order(plan: Plan) -> tuple[PlanStep, ...]:
+    """Steps in dependency order, raising PlanValidationError on a cycle.
+
+    Ties break on step_id so the order is deterministic: two runs of the same
+    plan must dispatch in the same sequence or the traces stop comparing.
+    """
+    by_id = {s.step_id: s for s in plan.steps}
+    unresolved = {s.step_id: set(s.depends_on) for s in plan.steps}
+    ordered: list[PlanStep] = []
+
+    while unresolved:
+        ready = sorted(sid for sid, deps in unresolved.items() if not deps)
+        if not ready:
+            raise PlanValidationError(
+                f"dependency cycle among steps {sorted(unresolved)}"
+            )
+        for sid in ready:
+            ordered.append(by_id[sid])
+            del unresolved[sid]
+        for deps in unresolved.values():
+            deps.difference_update(ready)
+
+    return tuple(ordered)
+
+
+# --------------------------------------------------------------------------
+# Transport tolerance — the same parsing philosophy as the auditor.
+# --------------------------------------------------------------------------
+
+_FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*\n?(?P<body>.*?)\n?\s*```$", re.DOTALL)
+
+
+def _strip_fences(text: str) -> str:
+    match = _FENCE_RE.match(text.strip())
+    return match.group("body").strip() if match else text.strip()
+
+
+def _first_json_object(text: str) -> str | None:
+    """First balanced {...}, ignoring braces inside strings."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def parse_plan(text: str, request: str, planned_by: str) -> Plan:
+    """Build a validated Plan from a model's reply.
+
+    Tolerant about how the JSON arrives — fenced, prose-wrapped, whatever —
+    and unforgiving about what it says. Raises PlanValidationError, which the
+    caller turns into exactly one repair attempt and then a fail-closed.
+    """
+    candidate = _strip_fences(text or "")
+    data = None
+    for attempt in (candidate, _first_json_object(candidate)):
+        if not attempt:
+            continue
+        try:
+            data = json.loads(attempt)
+            break
+        except json.JSONDecodeError:
+            data = None
+    if not isinstance(data, dict):
+        raise PlanValidationError("planner reply was not a JSON object")
+
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list):
+        raise PlanValidationError("planner reply has no 'steps' list")
+
+    steps: list[PlanStep] = []
+    for i, raw in enumerate(raw_steps, start=1):
+        if not isinstance(raw, dict):
+            raise PlanValidationError(f"steps[{i - 1}] is not an object")
+        depends = raw.get("depends_on", ())
+        if isinstance(depends, str):
+            depends = (depends,)
+        if not isinstance(depends, (list, tuple)):
+            raise PlanValidationError(f"step {i}: depends_on must be a list")
+        try:
+            steps.append(
+                PlanStep(
+                    step_id=str(raw.get("step_id") or f"s{i}"),
+                    prompt=str(raw.get("prompt", "")),
+                    task_type=str(raw.get("task_type", "")).strip().lower(),
+                    complexity=float(raw.get("complexity", 0.5)),
+                    est_input_tokens=int(raw.get("est_input_tokens", 0)),
+                    est_output_tokens=int(raw.get("est_output_tokens", 0)),
+                    depends_on=tuple(str(d) for d in depends),
+                )
+            )
+        except (TypeError, ValueError) as e:
+            raise PlanValidationError(f"step {i}: {e}") from None
+
+    plan = Plan(
+        request=request,
+        steps=tuple(steps),
+        planned_by=planned_by,
+        confidence=float(data.get("confidence", 0.5) or 0.5),
+        rationale=str(data.get("rationale", "")) or "model-proposed decomposition",
+    )
+    validate_plan(plan)
+    return plan
+
+
+# --------------------------------------------------------------------------
+# The heuristic splitter.
+# --------------------------------------------------------------------------
+
+# Explicit sequencing. These are the ONLY prose markers that authorise a
+# split: they state that one thing happens after another.
+_SEQUENCE = [
+    (3, r"\bthen\b"),
+    (3, r"\bafter (?:that|which)\b"),
+    (3, r"\bonce (?:that|you|it)(?:'s| is| have| has)? (?:done|finished|ready)\b"),
+    (3, r"\bfinally\b"),
+    (2, r"\bnext,"),
+    (2, r"\blastly\b"),
+    (2, r"\bafterwards?\b"),
+    (2, r"\bfollowed by\b"),
+    (2, r"\band then\b"),
+]
+
+# Enumeration: the writer already did the decomposition for us.
+_NUMBERED = re.compile(r"(?:^|\n)\s*(?:\(?\d+[.)]|[-*•])\s+", re.MULTILINE)
+_ORDINAL = re.compile(
+    r"\b(?:first|second|third|fourth|fifth)(?:ly)?\s*[,:]", re.IGNORECASE
+)
+
+# Verbs that name a *kind* of work. Several distinct kinds with no explicit
+# structure is the signature of a compound request the heuristic cannot safely
+# cut — it lowers confidence instead, which is what opens the model gate.
+_WORK_VERBS = {
+    "extraction": r"\b(?:extract|parse|pull|scrape|list all|find all)\b",
+    "summarization": r"\b(?:summari[sz]e|condense|recap|boil down|tl;?dr)\b",
+    "coding": r"\b(?:refactor|debug|implement|write (?:a |the )?(?:function|script|handler|test|query))\b",
+    "creative": r"\b(?:draft|write (?:the |a )?(?:copy|post|story|email|page)|brainstorm)\b",
+    "reasoning": r"\b(?:recommend|evaluate|decide|assess|analy[sz]e|compare|tell me (?:if|whether)|should we)\b",
+}
+
+_MIN_FRAGMENT_WORDS = 3
+
+
+def _segment(request: str) -> tuple[list[str], list[str], str]:
+    """Cut a request on explicit structure only. Returns (fragments, signals, kind)."""
+    signals: list[str] = []
+
+    if _NUMBERED.search(request):
+        parts = [p.strip() for p in _NUMBERED.split(request) if p.strip()]
+        if len(parts) > 1:
+            signals.append(f"enumeration: {len(parts)} listed items")
+            return parts, signals, "enumeration"
+
+    if _ORDINAL.search(request):
+        parts = [p.strip() for p in _ORDINAL.split(request) if p and p.strip()]
+        if len(parts) > 1:
+            signals.append(f"ordinal words: {len(parts)} segments")
+            return parts, signals, "ordinal"
+
+    pattern = "|".join(p for _, p in _SEQUENCE)
+    if re.search(pattern, request, re.IGNORECASE):
+        for weight, p in _SEQUENCE:
+            if re.search(p, request, re.IGNORECASE):
+                signals.append(f"sequence+{weight}:{p}")
+        parts = [p.strip(" ,;.") for p in re.split(pattern, request, flags=re.IGNORECASE)]
+        parts = [p for p in parts if len(p.split()) >= _MIN_FRAGMENT_WORDS]
+        if len(parts) > 1:
+            return parts, signals, "sequence"
+
+    return [request.strip()], signals, "none"
+
+
+def _distinct_work_kinds(request: str) -> set[str]:
+    """Which kinds of work the request names, regardless of structure."""
+    return {
+        kind
+        for kind, pattern in _WORK_VERBS.items()
+        if re.search(pattern, request, re.IGNORECASE)
+    }
+
+
+def _estimate_tokens(fragment: str, complexity: float) -> tuple[int, int]:
+    """Rough per-step token estimates. Estimates, and labelled as such.
+
+    Re-estimated at dispatch with real counts from prior steps, so being
+    approximate here costs accuracy in the plan preview, not in the bill.
+    """
+    est_in = max(120, len(fragment) // 3)
+    est_out = int(200 + 900 * complexity)
+    return est_in, est_out
+
+
+def no_split_plan(
+    request: str,
+    reason: str,
+    *,
+    planned_by: str = NOT_SPLIT,
+    confidence: float = 1.0,
+    signals: tuple[str, ...] = (),
+    est_input_tokens: int | None = None,
+    est_output_tokens: int | None = None,
+) -> Plan:
+    """A one-step plan carrying the whole request.
+
+    Single-step rather than zero-step so execution is uniform: `run_plan`
+    always walks a list, and "not split" needs no special case anywhere
+    downstream.
+    """
+    verdict = classify_heuristic(request)
+    default_in, default_out = _estimate_tokens(request, verdict.complexity)
+    plan = Plan(
+        request=request,
+        steps=(
+            PlanStep(
+                step_id="s1",
+                prompt=request,
+                task_type=verdict.task_type,
+                complexity=verdict.complexity,
+                est_input_tokens=(
+                    default_in if est_input_tokens is None else est_input_tokens
+                ),
+                est_output_tokens=(
+                    default_out if est_output_tokens is None else est_output_tokens
+                ),
+            ),
+        ),
+        planned_by=planned_by,
+        confidence=confidence,
+        rationale=reason,
+        signals=signals,
+    )
+    validate_plan(plan)
+    return plan
+
+
+def plan_heuristic(
+    request: str,
+    *,
+    est_input_tokens: int | None = None,
+    est_output_tokens: int | None = None,
+) -> Plan:
+    """Decompose a request using explicit structure only.
+
+    Biased hard against splitting. Only enumeration, ordinals, and sequence
+    connectives authorise a cut. Comma chains do not ("extract names, emails
+    and phone numbers" is one extraction), and neither does length — a long
+    prompt is not a compound one, and treating it as such is the expensive
+    failure this planner exists to avoid.
+
+    When several kinds of work are named but no structure marks them out, the
+    heuristic declines to split *and reports low confidence*, which is the
+    signal that opens the model gate.
+    """
+    text = (request or "").strip()
+    if not text:
+        raise PlanValidationError("cannot plan an empty request")
+
+    fragments, signals, kind = _segment(text)
+    kinds = _distinct_work_kinds(text)
+
+    if kind == "none":
+        if len(kinds) > 1:
+            # Compound-looking, structurally unmarked. Do not guess where the
+            # seams are; say so and let the gate decide whether to pay a model.
+            return no_split_plan(
+                text,
+                reason=(
+                    f"no explicit structure, but {len(kinds)} kinds of work named "
+                    f"({', '.join(sorted(kinds))}); declining to guess the split"
+                ),
+                planned_by="heuristic",
+                confidence=0.20,
+                signals=tuple(signals + [f"work-kinds:{','.join(sorted(kinds))}"]),
+                est_input_tokens=est_input_tokens,
+                est_output_tokens=est_output_tokens,
+            )
+        return no_split_plan(
+            text,
+            reason="single task: no enumeration, ordinals, or sequence connectives",
+            planned_by="heuristic",
+            confidence=0.95,
+            signals=tuple(signals),
+            est_input_tokens=est_input_tokens,
+            est_output_tokens=est_output_tokens,
+        )
+
+    # Classify each fragment with the existing triage classifier, then merge
+    # adjacent fragments of the same kind: "extract A. extract B." is two
+    # sentences describing one job, and splitting it buys two audits for
+    # nothing.
+    classified = [(f, classify_heuristic(f)) for f in fragments]
+    merged: list[tuple[str, object]] = []
+    for fragment, verdict in classified:
+        if merged and merged[-1][1].task_type == verdict.task_type:
+            prev_fragment, prev_verdict = merged[-1]
+            keep = prev_verdict if prev_verdict.complexity >= verdict.complexity else verdict
+            merged[-1] = (f"{prev_fragment} {fragment}".strip(), keep)
+            signals.append(f"merged adjacent {verdict.task_type} fragments")
+        else:
+            merged.append((fragment, verdict))
+
+    if len(merged) < 2:
+        return no_split_plan(
+            text,
+            reason=(
+                f"{kind} structure found, but all fragments are the same kind of "
+                f"work ({merged[0][1].task_type}); one step is cheaper than two"
+            ),
+            planned_by="heuristic",
+            confidence=0.80,
+            signals=tuple(signals),
+            est_input_tokens=est_input_tokens,
+            est_output_tokens=est_output_tokens,
+        )
+
+    steps: list[PlanStep] = []
+    for i, (fragment, verdict) in enumerate(merged[:MAX_STEPS], start=1):
+        est_in, est_out = _estimate_tokens(fragment, verdict.complexity)
+        steps.append(
+            PlanStep(
+                step_id=f"s{i}",
+                prompt=fragment,
+                task_type=verdict.task_type,
+                complexity=verdict.complexity,
+                est_input_tokens=est_in,
+                est_output_tokens=est_out,
+                # Linear chain: the markers that authorise a split are
+                # sequential ones, so each step is assumed to want the last
+                # one's output. A planner that inferred finer dependencies
+                # would be guessing.
+                depends_on=() if i == 1 else (f"s{i - 1}",),
+            )
+        )
+
+    # Confidence tracks how explicit the structure was, not how good the split
+    # looks. Enumeration is the writer's own decomposition; prose connectives
+    # are an inference.
+    confidence = {"enumeration": 0.95, "ordinal": 0.85, "sequence": 0.75}[kind]
+    plan = Plan(
+        request=text,
+        steps=tuple(steps),
+        planned_by="heuristic",
+        confidence=confidence,
+        rationale=(
+            f"split into {len(steps)} steps on {kind} structure "
+            f"({', '.join(s.task_type for s in steps)})"
+        ),
+        signals=tuple(signals),
+    )
+    validate_plan(plan)
+    return plan
+
+
+def with_planned_by(plan: Plan, planned_by: str) -> Plan:
+    """Relabel a plan's author. Used when a model plan is rejected and the
+    heuristic's answer stands in — the credit must follow the work."""
+    return replace(plan, planned_by=planned_by)
