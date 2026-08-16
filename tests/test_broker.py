@@ -90,8 +90,14 @@ class EscalationTests(unittest.TestCase):
         # Regression: the escalation target was hardcoded to "reasoning", so a
         # failed coding task escalated to whichever model reasoned best.
         registry = Registry([
+            # coding=0.72 clears the qualification bar comfortably, not just
+            # barely — a model scored at the bar is only as good as "unknown"
+            # (see UNKNOWN_CAPABILITY_PRIOR) and legitimately loses the
+            # initial routing pick to a near-perfect frontier model even
+            # under a cost-conscious policy. This fixture is testing
+            # escalation's target choice, not the routing tradeoff itself.
             ModelSpec("cheap", "mock", "small", 0.1, 0.5, latency="fast",
-                      capabilities={"coding": 0.5, "reasoning": 0.5, "audit": 0.4}),
+                      capabilities={"coding": 0.72, "reasoning": 0.72, "audit": 0.4}),
             ModelSpec("thinker", "mock", "frontier", 3.0, 15.0,
                       capabilities={"coding": 0.60, "reasoning": 0.99, "audit": 0.9}),
             ModelSpec("coder", "mock", "frontier", 3.0, 15.0,

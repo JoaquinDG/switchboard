@@ -1,4 +1,6 @@
 import unittest
+from datetime import date
+from pathlib import Path
 
 from switchboard import (
     BALANCED,
@@ -12,6 +14,9 @@ from switchboard import (
     demo_registry,
     route,
 )
+from switchboard.router import _quality_score
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 class RouterTests(unittest.TestCase):
@@ -180,6 +185,57 @@ class CostNormalizationTests(unittest.TestCase):
     def test_empty_registry_raises(self):
         with self.assertRaises(ValueError):
             route(Task(prompt="x"), Registry([]), BALANCED)
+
+
+class QualityScoreScaleTests(unittest.TestCase):
+    """ROADMAP item 1b: raw capability clusters tightly (0.78-0.95 in
+    practice) while cost and latency both span their full [0, 1] range, so a
+    policy's quality_weight bought far less influence than its number
+    implied. Regression coverage for the fix and for the narrow-catalog
+    failure mode the *rejected* fix (candidate-range min-max) caused."""
+
+    def test_quality_score_anchors_on_the_unknown_prior_not_zero(self):
+        # A model scored exactly at UNKNOWN_CAPABILITY_PRIOR is, by the
+        # catalog's own convention, no better than "no data" — it should
+        # floor out at 0, not sit at the raw value's 0.5.
+        self.assertEqual(_quality_score(0.5), 0.0)
+        self.assertEqual(_quality_score(1.0), 1.0)
+        self.assertAlmostEqual(_quality_score(0.75), 0.5)
+
+    def test_quality_score_clips_rather_than_going_negative(self):
+        self.assertEqual(_quality_score(0.3), 0.0)
+
+    def test_quality_first_prefers_the_more_capable_model_over_a_faster_one(self):
+        # README Finding 3, measured live: on the 16-model starter catalog,
+        # claude-opus-5's 0.093 raw-capability edge over gemini-3.7-flash
+        # lost to gemini's latency advantage under quality_first — a policy
+        # named quality-first should not do that.
+        registry = Registry.from_json(
+            REPO / "examples" / "starter_catalog.json", today=date(2026, 8, 16)
+        )
+        task = Task(prompt="deep reasoning task", task_type="reasoning", complexity=0.6)
+        decision = route(task, registry, QUALITY_FIRST)
+        self.assertEqual(decision.chosen.model_id, "claude-opus-5")
+
+    def test_narrow_catalog_easy_extraction_still_stays_cheap(self):
+        # The fix this replaces (min-max normalizing over the observed
+        # candidate range) broke exactly this case: a 3-model catalog with a
+        # tight capability spread turned into a full 0-to-1 swing and sent
+        # easy work to the frontier model under cost_first. The fixed
+        # version anchors on a fixed constant, not the candidate set, so it
+        # must not reproduce that.
+        registry = demo_registry()
+        task = Task(prompt="pull the dates out", task_type="extraction", complexity=0.2)
+        decision = route(task, registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "atlas-small")
+
+    def test_rationale_shows_both_raw_capability_and_the_score_it_earned(self):
+        registry = demo_registry()
+        task = Task(prompt="hi", task_type="reasoning", complexity=0.1)
+        decision = route(task, registry, BALANCED)
+        top = decision.ranked[0]
+        raw = top.spec.capability_for("reasoning")
+        self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
 
 
 if __name__ == "__main__":
