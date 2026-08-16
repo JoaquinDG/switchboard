@@ -25,7 +25,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evals"))
 
-from planner_cases import ALL_CASES, COMPOUND, NOT_COMPOUND  # noqa: E402
+from planner_cases import (  # noqa: E402
+    ALL_CASES,
+    COMPOUND,
+    COMPOUND_UNMARKED,
+    NOT_COMPOUND,
+)
 
 from switchboard import BALANCED, Registry, actual_cost, demo_registry  # noqa: E402
 from switchboard.planner import plan_heuristic, plan_with_model  # noqa: E402
@@ -79,7 +84,8 @@ def main() -> int:
                 tag = "repair" if attempt.get("repair") else "first"
                 print(f"  [{tag}] {attempt['reason'][:82]}")
 
-    print(f"\n{'threshold':>10} {'false splits':>13} {'coverage':>10} {'model calls':>12} {'cost':>10}")
+    print(f"\n{'threshold':>10} {'false splits':>13} {'coverage':>10} "
+          f"{'unmarked':>10} {'model calls':>12} {'cost':>10}")
     for threshold in THRESHOLDS:
         false_splits = covered = calls = 0
         cost = 0.0
@@ -93,10 +99,16 @@ def main() -> int:
                 covered += chosen.is_split
             else:
                 false_splits += chosen.is_split
+        unmarked = sum(
+            1 for case, h, m, _, _ in rows
+            if case in COMPOUND_UNMARKED
+            and (m if h.confidence < threshold else h).is_split
+        )
         note = ("  heuristic only" if threshold == 0.0
                 else "  model always" if threshold > 1.0 else "")
         print(f"{threshold:>10.2f} {false_splits:>10}/{len(NOT_COMPOUND)} "
-              f"{covered:>7}/{len(COMPOUND)} {calls:>12} ${cost:>9.5f}{note}")
+              f"{covered:>7}/{len(COMPOUND) + len(COMPOUND_UNMARKED)} "
+              f"{unmarked:>9}/{len(COMPOUND_UNMARKED)} {calls:>12} ${cost:>9.5f}{note}")
 
     print(f"\n{len(rows)} requests, {elapsed:.0f}s for the model pass "
           f"({elapsed / len(rows):.1f}s per plan).")

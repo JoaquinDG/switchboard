@@ -1,6 +1,7 @@
 """Labeled requests for the planner eval.
 
-Twelve compound requests and ten that only look compound. The negatives matter
+Three sets: compound requests with explicit structure, compound requests
+without it, and requests that only look compound. The negatives matter
 more than the positives: a planner that splits something simple buys extra
 audits, extra escalations and extra latency for work that needed one call, and
 it does so silently. Under-splitting costs you a saving; over-splitting costs
@@ -105,6 +106,31 @@ COMPOUND: tuple[Case, ...] = (
 )
 
 
+# Genuinely compound, but with NO enumeration, ordinal or sequence connective
+# to cut on. The heuristic's stated contract is that it splits on explicit
+# structure, so it is right to decline these — measuring it against them and
+# calling that a failure would misrepresent what it claims to do.
+#
+# They are scored separately for that reason, and reported rather than hidden:
+# this is the model layer's territory, and the only set on which an A/B between
+# the layers can measure anything at all.
+COMPOUND_UNMARKED: tuple[Case, ...] = (
+    Case(
+        "Read this contract, extract the payment terms, and tell me if we "
+        "should sign it.",
+        True, ("extraction", "reasoning"),
+        "heuristic KNOWS it cannot judge: confidence 0.20, which opens the gate",
+    ),
+    Case(
+        "Take these support tickets, work out which themes are growing, write "
+        "me something I can send to the team.",
+        True, ("reasoning", "creative"),
+        "heuristic is confidently WRONG: 0.95, so the gate never opens — a "
+        "blind spot, not a known unknown",
+    ),
+)
+
+
 NOT_COMPOUND: tuple[Case, ...] = (
     Case("Summarize this board memo for a non-executive reader.", False),
     Case(
@@ -139,4 +165,4 @@ NOT_COMPOUND: tuple[Case, ...] = (
 )
 
 
-ALL_CASES: tuple[Case, ...] = COMPOUND + NOT_COMPOUND
+ALL_CASES: tuple[Case, ...] = COMPOUND + COMPOUND_UNMARKED + NOT_COMPOUND

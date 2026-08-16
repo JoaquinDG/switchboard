@@ -625,6 +625,14 @@ Your previous reply was rejected: {reason}
 Return corrected JSON in exactly the schema above, and nothing else."""
 
 
+# Planning is a JSON-emitting task, and reasoning models spend thinking tokens
+# from the same budget before they emit anything. Measured on deepseek-v4-flash:
+# at the 1024 default it burned the entire budget thinking and returned ZERO
+# visible characters, which arrived here looking like malformed JSON. A simple
+# plan needs ~650 output tokens once thinking is paid for; this leaves headroom.
+PLANNER_MAX_TOKENS = 4000
+
+
 def _cheapest(registry):
     """Planning is a classification, not the work. Never frontier by default."""
     return min(registry.all(), key=lambda m: (m.output_cost, m.input_cost))
@@ -664,13 +672,30 @@ def plan_with_model(
     )
     for attempt in range(2):  # first try, then exactly one repair
         try:
-            reply = provider.complete(spec.model_id, prompt)
+            reply = provider.complete(spec.model_id, prompt, max_tokens=PLANNER_MAX_TOKENS)
         except Exception as e:  # noqa: BLE001
             discarded.append({
                 "model_id": spec.model_id, "reason": f"{type(e).__name__}: {e}",
                 "cost_usd": 0.0, "repair": attempt == 1,
             })
             break
+
+        if reply.truncated:
+            # Say truncated, not malformed. And do NOT spend a repair attempt:
+            # a retry at the same ceiling truncates identically, which is the
+            # same waste as escalating a truncated answer to a bigger model.
+            discarded.append({
+                "model_id": spec.model_id,
+                "reason": (f"reply TRUNCATED at max_tokens ({PLANNER_MAX_TOKENS}); "
+                           f"raise the ceiling rather than retrying"),
+                "input_tokens": reply.input_tokens,
+                "output_tokens": reply.output_tokens,
+                "cost_usd": actual_cost(spec, reply.input_tokens, reply.output_tokens),
+                "repair": attempt == 1,
+                "truncated": True,
+            })
+            break
+
         try:
             plan = parse_plan(reply.text, request, f"model:{spec.model_id}")
             return plan, discarded

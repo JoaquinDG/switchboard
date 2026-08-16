@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 300 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 302 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -248,7 +248,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 300 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 302 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -311,6 +311,29 @@ Same architecture as triage, for the same reason. The **heuristic** is free, off
 Where several kinds of work are named but nothing marks the seams, it **declines to split and reports low confidence** rather than guessing. That is what opens the gate to the **model layer**, which runs on the cheapest model in the catalog, gets exactly one repair attempt if its JSON fails validation, and falls back to the heuristic on any failure.
 
 `planned_by` names the layer that actually decided. A model call that produced nothing usable is credited to the heuristic that rescued it, and the plan it wasted money on is reported in `discarded_attempts` rather than quietly absorbed.
+
+### Measured: what the model layer is worth
+
+`examples/planner_ab.py`, 24 labeled requests against live APIs:
+
+| | false splits | coverage | unmarked compounds | model calls | cost |
+|---|---|---|---|---|---|
+| Heuristic only | 0/10 | 11/14 | **0/2** | 0 | free |
+| **Gated at 0.25** | 0/10 | 12/14 | **1/2** | 1 | $0.00010 |
+| Model always | 0/10 | 13/14 | **2/2** | 24 | $0.00246 |
+
+Two things this settled.
+
+**The model layer never over-splits.** Zero false splits at every threshold, which was the risk worth checking — a planner that splits eagerly is the failure mode that costs money silently.
+
+**Confidence gating is bounded by the heuristic's self-knowledge, and here that bound bites.** For triage, confidence was a *perfect* separator: every wrong classification scored exactly 0.00. For the planner it is not. Of two genuinely compound requests with no structure to cut on:
+
+- *"Read this contract, extract the payment terms, and tell me if we should sign it"* → confidence **0.20**. The heuristic knows it cannot judge, the gate opens, the model splits it correctly.
+- *"Take these support tickets, work out which themes are growing, write me something I can send"* → confidence **0.95**. Confidently wrong. No connective, and the phrasings ("work out", "write me something") match none of the work-verb patterns, so it sees one job. **The gate never opens.**
+
+A blind spot is worse than a known unknown: gating cannot rescue a case the heuristic is confident about. That is why the unmarked compounds are scored separately in the eval rather than folded into coverage — the number that matters there is not "did it split" but "did it know it couldn't tell".
+
+Latency, not money, is the reason the gate is worth having: **13s per model plan**, so always-asking costs 312s across the set to gain one case over the gate's one call.
 
 ### Biased against splitting
 
@@ -430,6 +453,10 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 16. **Caller-supplied token estimates were discarded on split.** A request declared at 12k input tokens planned as steps of ~120, so the router priced a large job as a trivial one. Found because the eval's cost comparison produced an impossible number and the estimator, not the economics, turned out to be what it was measuring.
 
+17. **The planner's model layer was 100% broken by truncation, and said "malformed JSON".** Every one of 10 rejected model plans was the same failure found earlier in the adapters: a reasoning model spending its whole `max_tokens` budget thinking and returning zero visible characters. At the 1024 default, `deepseek-v4-flash` emitted **0 characters**; at 3000 it produced valid JSON in 655 output tokens. Worse, the code then spent a *repair* attempt that would truncate identically — the same waste as escalating a truncated answer to a bigger model. Planning now runs with headroom, reports truncation as truncation, and does not retry it. Rejections went from 10 to 0.
+
+18. **Confidence gating is only as good as the heuristic's self-knowledge.** Triage's confidence was a perfect separator of its own errors. The planner's is not: of two unmarked compound requests, one scored 0.20 (gate opens, model rescues it) and one scored 0.95 while being wrong (gate stays shut). Same mechanism, different reliability — which is an argument for measuring a gate on every classifier that uses one, rather than assuming the property transfers.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -501,8 +528,8 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               300 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
-evals/               8 routing scenarios, 40 triage prompts, 22 planner cases
+tests/               302 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
                      triage_ab/planner_ab, catalogs
 CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"

@@ -23,7 +23,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from planner_cases import ALL_CASES, COMPOUND, NOT_COMPOUND  # noqa: E402
+from planner_cases import (  # noqa: E402
+    ALL_CASES,
+    COMPOUND,
+    COMPOUND_UNMARKED,
+    NOT_COMPOUND,
+)
 
 from switchboard import (  # noqa: E402
     BALANCED,
@@ -104,6 +109,27 @@ def run() -> int:
         print(f"        {plan.rationale}")
         if case.note:
             print(f"        label note: {case.note}")
+
+    # ---- 2b. The set the heuristic does not claim to handle.
+    print("\n" + "=" * 100)
+    print("UNMARKED COMPOUNDS — genuinely compound, no structure to cut on")
+    print("=" * 100)
+    print("  The heuristic splits on explicit structure by design, so declining")
+    print("  these is correct behaviour, not a miss. What matters is whether it")
+    print("  KNOWS it cannot judge — low confidence opens the model gate; high")
+    print("  confidence means the model is never asked.")
+    print()
+    gate_would_open = 0
+    for case in COMPOUND_UNMARKED:
+        plan = plan_heuristic(case.request)
+        opens = plan.confidence < 0.25
+        gate_would_open += opens
+        print(f"  conf={plan.confidence:.2f}  gate {'OPENS ' if opens else 'STAYS SHUT'}  "
+              f"{case.request[:52]}")
+        print(f"            {case.note}")
+    print(f"\n  model gate would fire on {gate_would_open}/{len(COMPOUND_UNMARKED)}")
+    print("  A blind spot is worse than a known unknown: the gate cannot rescue")
+    print("  a case the heuristic is confident about.")
 
     # ---- 3. Step-type agreement with the hand labels.
     print("\n" + "=" * 100)

@@ -467,6 +467,39 @@ class ModelPlannerTests(unittest.TestCase):
         self.assertEqual(plan.planned_by, "heuristic")
         self.assertTrue(any("cycle" in d["reason"] for d in discarded))
 
+    def test_a_truncated_reply_is_named_as_truncation_not_malformed_json(self):
+        # Found live: every rejected model plan was a reasoning model spending
+        # its whole budget thinking and emitting nothing. Calling that
+        # "malformed JSON" sends you debugging the wrong thing.
+        from switchboard import Completion, ProviderPool
+        from switchboard.planner import plan_with_model
+
+        class Truncating:
+            name = "mock"
+            calls = 0
+
+            def complete(self, model_id, prompt, max_tokens=1024):
+                type(self).calls += 1
+                return Completion("", model_id, 50, max_tokens, stop_reason="length")
+
+        provider = Truncating()
+        plan, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), ProviderPool([provider]))
+        self.assertEqual(plan.planned_by, "heuristic")
+        self.assertEqual(len(discarded), 1)
+        self.assertIn("TRUNCATED", discarded[0]["reason"])
+        self.assertTrue(discarded[0]["truncated"])
+        # And crucially: no repair attempt. A retry at the same ceiling
+        # truncates identically.
+        self.assertEqual(Truncating.calls, 1)
+
+    def test_planning_asks_for_enough_tokens_to_answer(self):
+        from switchboard.planner import PLANNER_MAX_TOKENS
+
+        # Measured: a simple plan needs ~650 output tokens once a reasoning
+        # model has paid for its thinking.
+        self.assertGreaterEqual(PLANNER_MAX_TOKENS, 2000)
+
     def test_provider_outage_falls_back_silently_to_the_heuristic(self):
         from switchboard import ProviderPool, ProviderUnavailable, ScriptedProvider
         from switchboard.planner import plan_with_model
