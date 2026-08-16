@@ -105,6 +105,9 @@ class PlanResult:
     # Set only when policy.plan_final_audit is on: one audit of the assembled
     # answer against the original request.
     final_audit: AuditVerdict | None = None
+    # (step_id, reason) for steps never dispatched because something they
+    # depend on failed its audit. Reported rather than silently missing.
+    skipped_steps: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def verified(self) -> bool:
@@ -115,6 +118,8 @@ class PlanResult:
         assembled answer still not address the original request. With it on,
         the coherence check must pass too.
         """
+        if self.skipped_steps:
+            return False  # part of the plan never ran
         if not self.steps or not all(s.result.verified for s in self.steps):
             return False
         if self.final_audit is not None:
@@ -418,9 +423,26 @@ class Broker:
 
         outputs: dict[str, str] = {}
         results: list[StepResult] = []
+        skipped: list[tuple[str, str]] = []
+        poisoned: set[str] = set()
         cap = self.policy.plan_context_cap_chars
 
         for step in topological_order(plan):
+            upstream_failed = sorted(poisoned.intersection(step.depends_on))
+            if upstream_failed and self.policy.plan_halt_dependents_on_failure:
+                # Its input is output already judged wrong, and it would
+                # consume that as ground truth. Skipping is not giving up on
+                # the plan — independent steps still run.
+                reason = (f"depends on {', '.join(upstream_failed)}, which did not "
+                          f"verify; its output would be built on rejected input")
+                skipped.append((step.step_id, reason))
+                poisoned.add(step.step_id)
+                self._trace_event("step_skipped", {
+                    "step_id": step.step_id, "reason": reason,
+                    "depends_on_failed": upstream_failed,
+                })
+                continue
+
             prompt, injected, truncated, sources = self._thread_context(step, outputs, cap)
             # Injected context is real input the model pays for, so the routing
             # estimate is re-derived at dispatch instead of trusting the
@@ -444,6 +466,8 @@ class Broker:
 
             result = self.run(task)
             outputs[step.step_id] = result.final_text
+            if not result.verified:
+                poisoned.add(step.step_id)
             results.append(StepResult(
                 step_id=step.step_id, step=step, result=result,
                 injected_chars=injected, injected_truncated=truncated,
@@ -464,7 +488,8 @@ class Broker:
 
         plan_result = self._finalize_plan(plan, results)
         plan_result.discarded_attempts = list(discarded)
-        if self.policy.plan_final_audit and results:
+        plan_result.skipped_steps = skipped
+        if self.policy.plan_final_audit and results and not skipped:
             plan_result.final_audit = self._audit_plan(plan, plan_result)
             plan_result.routed_cost_usd += plan_result.final_audit.cost_usd
             self._trace_event("plan_audited", {
@@ -479,6 +504,7 @@ class Broker:
             "verified": plan_result.verified,
             "is_split": plan_result.is_split,
             "steps": len(plan_result.steps),
+            "skipped_steps": [list(pair) for pair in plan_result.skipped_steps],
             "routed_cost_usd": round(plan_result.routed_cost_usd, 8),
             "baseline_best_model_usd": round(plan_result.baseline_best_model_usd, 8),
             "baseline_single_call_usd": round(plan_result.baseline_single_call_usd, 8),

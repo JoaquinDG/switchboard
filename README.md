@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 308 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 313 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -248,7 +248,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 308 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 313 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -342,6 +342,8 @@ Over-splitting is the expensive error: extra calls, extra audits, extra latency,
 ### Execution
 
 Steps run in dependency order, each dispatched through `Broker.run()` **unchanged**: nothing bypasses triage, the gates, auditing, escalation or failover. A dependent step gets its predecessor's output under a labelled fence, and the routing estimate is re-derived at dispatch because injected context is real input someone pays for. Truncation at `Policy.plan_context_cap_chars` is **named in the trace**, never swallowed.
+
+If a step fails its audit, the steps that **depend** on it are skipped rather than run against rejected input — 58% of a failing run's spend used to land after the failure was already known. Independent steps still run, and `result.skipped_steps` names each skip and why. Set `Policy.plan_halt_dependents_on_failure=False` when a later step's partial answer is useful on its own.
 
 `result.verified` means every step passed its own audit. That is not the same as the assembled answer being coherent — set `Policy.plan_final_audit=True` for one extra audit of the assembled result against the *original* request, which is the only check that can see whether the pipeline answered the question it was asked.
 
@@ -463,6 +465,8 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 21. **The default output ceiling was too low, three separate times.** The `Provider` protocol defaults to 1024 tokens, and reasoning models spend thinking tokens from that same budget before emitting anything. Measured: `claude-opus-5` spent 340 of 400; `deepseek-v4-flash` emitted **zero characters** at 1024 and valid JSON at 3000. It surfaced once as a fake quality failure, once as "malformed JSON" from the planner, and once as a truncated pipeline step. Now `Policy.max_output_tokens`, defaulting to 2000, applied to every generation and audit call. Three incidents from one root cause is a default, not a coincidence.
 
+22. **A plan kept building on a step it had already rejected.** When a step failed its audit, every dependent step still ran — consuming the rejected output as ground truth and producing a confidently worded answer built on it. Measured: **58% of a run's spend happened after the failure was already known.** Dependents of a failed step are now skipped by default (`Policy.plan_halt_dependents_on_failure`), with the reason recorded per step and carried through replay. Independent steps still run: only dependents are poisoned. Same information, 58% less money, and the gap in the answer is explicit instead of papered over.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -534,7 +538,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               308 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               313 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios, 40 triage prompts, 24 planner cases
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
                      triage_ab/planner_ab, catalogs

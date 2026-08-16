@@ -111,6 +111,15 @@ class Policy:
     # Off by default because it is a whole extra audit on the largest artefact
     # the plan produced.
     plan_final_audit: bool = False
+    # When a step ends unverified, skip the steps that DEPEND on it. Their
+    # input is output the system has already judged wrong, and they consume it
+    # as ground truth — measured, 58% of a run's spend happened after the
+    # failure was known, producing a confidently worded answer built on it.
+    # Independent steps still run: only dependents are poisoned.
+    #
+    # Set False to run every step regardless, which is the right choice when a
+    # partial answer from a later step is useful on its own.
+    plan_halt_dependents_on_failure: bool = True
     # How many times the broker may reroute to the next-ranked model when a
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
