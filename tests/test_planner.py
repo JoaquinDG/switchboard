@@ -250,6 +250,40 @@ class FragmentCoverageTests(unittest.TestCase):
                     self.assertTrue(step.prompt.strip())
 
 
+class TokenEstimateTests(unittest.TestCase):
+    """Caller-supplied volumes must survive a split."""
+
+    REQUEST = "Extract the pricing from these pages, then recommend a response."
+
+    def test_supplied_estimates_are_distributed_not_discarded(self):
+        # Regression, found by the planner eval: the split path ignored the
+        # caller's totals entirely, so a request declared at 12k input tokens
+        # planned as steps of ~120. The router then priced a large job as a
+        # trivial one, and the eval's cost comparison measured the estimator
+        # rather than the economics.
+        p = plan_heuristic(self.REQUEST, est_input_tokens=12_000, est_output_tokens=4_000)
+        self.assertTrue(p.is_split)
+        self.assertGreaterEqual(sum(s.est_input_tokens for s in p.steps), 12_000)
+        self.assertLessEqual(abs(sum(s.est_output_tokens for s in p.steps) - 4_000), 5)
+
+    def test_splitting_does_not_multiply_the_output_estimate(self):
+        # Splitting divides the work; it does not create three times as much.
+        p = plan_heuristic(self.REQUEST, est_output_tokens=1_000)
+        self.assertLessEqual(sum(s.est_output_tokens for s in p.steps), 1_005)
+
+    def test_the_first_step_carries_the_source_material(self):
+        p = plan_heuristic(self.REQUEST, est_input_tokens=9_000)
+        self.assertEqual(p.steps[0].est_input_tokens, 9_000)
+        # Later steps read their predecessor's output, which is measured at
+        # dispatch from the real thing rather than guessed at here.
+        self.assertLess(p.steps[1].est_input_tokens, 9_000)
+
+    def test_omitted_estimates_still_produce_usable_ones(self):
+        for s in plan_heuristic(self.REQUEST).steps:
+            self.assertGreater(s.est_input_tokens, 0)
+            self.assertGreater(s.est_output_tokens, 0)
+
+
 class ConfidenceGateTests(unittest.TestCase):
     """Low confidence is the signal that opens the model gate. It has to fire
     on the case the heuristic genuinely cannot judge."""

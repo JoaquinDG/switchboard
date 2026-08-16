@@ -61,8 +61,11 @@ problems; the third is a real hole in the thesis.
   unusable in an editor. Default audits **off** in the proxy and make them
   opt-in per request; the library default stays on.
 
-### U3. Composite tasks — decomposition
-- [ ] **Why it matters:** measured, not hypothesised. Switchboard routes one
+### U3. Composite tasks — decomposition — **DONE (v1)**
+- [x] Shipped: `planner.py` (Plan schema, strict validation, anti-split heuristic), `Broker.run_plan` (dependency-ordered dispatch through the unchanged broker path, context threading with named truncation, three labelled cost figures), `replay.py` (full reconstruction from trace alone), `evals/planner_eval.py` (22 labeled cases, false-split rate 0%, in CI).
+- **What it changed about the thesis:** the eval showed decomposition is a *correctness* mechanism first. Routing a compound request whole under-routed it 42% of the time — cheaper, but below the tier its hardest sub-task needs, and invisible to the qualification gate. See the README findings.
+- **Deferred to v2:** parallel execution of independent steps (blocked on async), step-output summarisation for long chains, recursive planning, and a plan-level final audit of the assembled answer.
+- **Original rationale:** measured, not hypothesised. Switchboard routes one
   task to one model, so a composite request routes at its *hardest* sub-task
   and everything runs at frontier prices: the four-part example in the README
   costs **$0.1600 as one task vs $0.0545 as four — 2.9x**. Triage does not

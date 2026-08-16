@@ -42,6 +42,11 @@ jobs:
       - name: Triage evals
         run: PYTHONPATH=src python evals/triage_eval.py
 
+      # False-split rate gates this one. Splitting a simple request buys extra
+      # calls, extra audits and extra latency for work that needed one call.
+      - name: Planner evals
+        run: PYTHONPATH=src python evals/planner_eval.py
+
       - name: Examples run offline
         run: |
           PYTHONPATH=src python examples/quickstart.py

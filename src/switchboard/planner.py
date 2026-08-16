@@ -538,9 +538,27 @@ def plan_heuristic(
             est_output_tokens=est_output_tokens,
         )
 
+    # Distribute any caller-supplied totals across the steps instead of
+    # discarding them. Silently ignoring them made every split plan invent its
+    # own scale: a request declared at 12k input tokens planned as three steps
+    # of ~120, so the router priced a large job as a trivial one and the eval's
+    # cost comparison measured this estimator rather than the economics.
+    kept = merged[:MAX_STEPS]
+    weights = [max(v.complexity, 0.05) for _, v in kept]
+    total_weight = sum(weights)
+
     steps: list[PlanStep] = []
-    for i, (fragment, verdict) in enumerate(merged[:MAX_STEPS], start=1):
+    for i, (fragment, verdict) in enumerate(kept, start=1):
         est_in, est_out = _estimate_tokens(fragment, verdict.complexity)
+        if est_input_tokens is not None:
+            # The first step consumes the source material; later steps read
+            # their predecessor's output, which is added at dispatch from the
+            # real thing rather than guessed at here.
+            est_in = est_input_tokens if i == 1 else est_in
+        if est_output_tokens is not None:
+            # Output is shared out by complexity: splitting divides the work,
+            # it does not multiply it.
+            est_out = max(1, int(est_output_tokens * weights[i - 1] / total_weight))
         steps.append(
             PlanStep(
                 step_id=f"s{i}",

@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 281 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 285 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -40,23 +40,33 @@ you  ->  someone's app  ->  [ SWITCHBOARD ]  ->  Anthropic / OpenAI / Google / D
 
 Today the integration is a Python import. A local OpenAI-compatible proxy — point any existing tool at it, change no code — is the next thing on the [roadmap](ROADMAP.md).
 
-### The limit worth knowing before you adopt it
+### Compound requests: what decomposition is actually for
 
-**Switchboard routes one task to one model. It does not split a request into parts.** That matters more than it sounds, because the savings depend on the split having already happened.
+**Switchboard routes one task to one model.** `Broker.run_plan()` will decompose a compound request first — but the reason turned out not to be the one I expected, and the eval is what corrected it.
 
-Give it a real-world sentence and it routes on the *hardest* thing in there, so everything runs at frontier prices:
+Routing a compound request whole means routing it at whatever the classifier makes of the *whole sentence*. Measured across 12 labeled compound requests (`evals/planner_eval.py`):
 
-| | Model | Est. cost |
-|---|---|---|
-| *"Pull the pricing from these pages, summarise it, recommend a response, and write the copy"* as **one** task | `claude-opus-5` | **$0.1600** |
-| The same work as **four** tasks | flash / flash / opus-5 / gemini-flash | **$0.0545** |
+| | Cost |
+|---|---|
+| Routed whole, as the classifier actually labels it | $0.1280 |
+| Routed whole, labelled at its **hardest** sub-task | $0.2400 |
+| Routed as a **plan** | $0.1460 |
 
-**2.9x.** The extraction that could have run at $0.28 per million output tokens runs at $25 instead.
+Read the first two rows together. Routing whole is cheap **because it misclassifies**: the request gets labelled by its dominant verb, lands on a small model, and the hard sub-task is never sent anywhere qualified. In **5 of 12 cases (42%)** the whole-request route landed a tier below what its hardest step needs — and the qualification gate cannot catch it, because the whole request looks like an easy extraction.
 
-Worse, triage does not notice. Asked to classify *"Read this contract, extract the payment terms, and tell me if we should sign it"*, it answers `extraction, complexity 0.30` with **confidence 1.00** — confidently wrong, since the hard part is the judgement call at the end. The confidence gate does not save it either: that gate guards against *no signal*, and a composite prompt hits a strong keyword and reports full confidence.
+*"1. Extract the payment terms. 2. Summarize the obligations. 3. Recommend whether we should sign"* classifies whole as `extraction`, routes to the small model, and costs $0.0032. The plan costs $0.0103 and sends the "should we sign" step to a model rated for it. The cheap version was never doing that work properly.
 
-So `examples/agentic_workflow.py` hand-writes its five steps, and that hand-splitting is doing real work the library does not do for you. Closing it is [ROADMAP](ROADMAP.md) item U3.
+So: **decomposition is a correctness mechanism first and a cost mechanism second.** Against a *correct* single call it is 1.6x cheaper; against the cheap mislabelled one it is 0.9x — more expensive, and worth it. The saving only shows up when the compound request was going to be labelled hard anyway, which on this set was 7 cases in 12.
 
+The planner is biased hard **against** splitting for the same reason: over-splitting buys extra calls, extra audits and extra latency for work that needed one call. False-split rate on 10 negatives is **0%**, it gates CI, and the negatives include the hardest one — long but single-task, because length is not structure.
+
+```python
+result = broker.run_plan(
+    "Extract the pricing from these pages, then summarise it, then recommend a response."
+)
+result.plan.describe()   # "plan: 3 steps (heuristic, confidence 0.75)"
+result.verified          # True only if every step passed its own audit
+```
 
 ## What it looks like
 
@@ -238,7 +248,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 281 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 285 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -359,6 +369,12 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 11. **A token ceiling was being misdiagnosed as poor quality.** The adapters discarded `stop_reason`, so an answer cut off at `max_tokens` looked identical to a complete bad one. A reasoning model that spent 340 of 400 output tokens thinking returned almost nothing, failed its audit as "empty", and triggered a paid escalation to a model that would truncate at the same ceiling. Raising the ceiling took the suite from 3/5 verified with 2 escalations to 4/5 with 1. Truncation is now carried on `Completion.truncated`, named by the auditor before any quality finding, and surfaced on `BrokerResult`.
 
+14. **Decomposition is not primarily a cost optimisation.** The planner was built on a measured 2.9x — a compound request routed whole costs 2.9x the same work routed as four steps. The planner eval then showed that figure assumes the whole request is *correctly labelled hard*. In practice the classifier labels a compound request by its dominant verb, so routing it whole is often **cheaper** — because it silently under-routes. On 12 labeled compound requests the whole-request route landed below its hardest sub-task's required tier **42% of the time**, which the qualification gate cannot catch since the request looks easy. Decomposition's first-order benefit is surfacing that hard step, not saving money; against a *correct* single call it is 1.6x cheaper, against the mislabelled one 0.9x.
+
+15. **The planner silently dropped part of the request.** Splitting on `then` produced a two-word fragment, and a minimum-length filter discarded it — so "extract the pricing, then summarize it, then recommend a response" planned three steps' worth of intent into two and never summarised anything. Short fragments now merge into a neighbour.
+
+16. **Caller-supplied token estimates were discarded on split.** A request declared at 12k input tokens planned as steps of ~120, so the router priced a large job as a trivial one. Found because the eval's cost comparison produced an impossible number and the estimator, not the economics, turned out to be what it was measuring.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -428,8 +444,8 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               281 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
-evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
+tests/               285 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+evals/               8 routing scenarios, 40 triage prompts, 22 planner cases
 examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
 CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"
 ```
