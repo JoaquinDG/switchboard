@@ -1,8 +1,12 @@
 # Switchboard
 
 [![CI](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/JoaquinDG/switchboard/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21953772.svg)](https://doi.org/10.5281/zenodo.21953772)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **An LLM model brokerage: route every task to the most efficient model, let models audit each other, and account for what it cost.**
+
+📄 **White paper:** [Stop Sending Everything to the Smartest Model: Policy-Based LLM Routing with Cross-Model Auditing](https://zenodo.org/records/21953773) — Diaz Gutierrez de Quijano, J. (2026). Zenodo. [doi:10.5281/zenodo.21953772](https://doi.org/10.5281/zenodo.21953772)
 
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
@@ -389,6 +393,7 @@ ROADMAP.md           the working backlog: what to build next and how not to fake
 tests/               216 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios + 40 labeled triage prompts (tuned and held-out)
 examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
+CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"
 ```
 
 ## Changelog
@@ -408,4 +413,33 @@ examples/            quickstart, agentic workflow, live_check/live_run/triage_ab
 - HTTP retries with jittered backoff and typed errors; `max_completion_tokens` vs `max_tokens` by base URL
 - Catalog validated on load with errors naming the offending entry; `ScriptedProvider` / `FlakyProvider`; `py.typed`; CI on 3.10–3.13
 
-MIT licensed.
+## Citing this work
+
+The paper describes the design; this repository is the implementation and the
+measurements. Both are citable.
+
+> Diaz Gutierrez de Quijano, J. (2026). *Stop Sending Everything to the Smartest
+> Model: Policy-Based LLM Routing with Cross-Model Auditing.* Zenodo.
+> https://doi.org/10.5281/zenodo.21953772
+
+```bibtex
+@misc{diazgutierrezdequijano2026switchboard,
+  author       = {Diaz Gutierrez de Quijano, Joaquin},
+  title        = {Stop Sending Everything to the Smartest Model:
+                  Policy-Based LLM Routing with Cross-Model Auditing},
+  year         = {2026},
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.21953772},
+  url          = {https://doi.org/10.5281/zenodo.21953772},
+  note         = {Preprint. Code: https://github.com/JoaquinDG/switchboard}
+}
+```
+
+The badge and BibTeX use the **concept DOI** (`…772`), which always resolves to
+the newest version. To cite this exact release instead, use the version DOI
+[`10.5281/zenodo.21953773`](https://doi.org/10.5281/zenodo.21953773).
+
+`CITATION.cff` carries the same metadata, so GitHub's "Cite this repository"
+button stays in step with the record.
+
+MIT licensed. The paper is CC BY 4.0.

@@ -1,0 +1,58 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its results, please cite the preprint below.
+  The paper describes the design; this repository is the implementation and
+  the measurements.
+title: "Switchboard: an LLM model brokerage with policy-based routing and cross-model auditing"
+abstract: >-
+  Switchboard routes each task to the most efficient model under an explicit,
+  versionable policy, then has a different model — preferably from a different
+  provider — grade the output. Failed audits escalate one tier up carrying the
+  auditor's findings; provider outages reroute on a separate budget; and every
+  attempt is costed at observed token counts so the price of verification is
+  visible rather than assumed. Zero runtime dependencies, stdlib only, and it
+  runs fully offline against a mock provider.
+type: software
+authors:
+  - family-names: "Diaz Gutierrez de Quijano"
+    given-names: "Joaquin"
+    orcid: "https://orcid.org/0009-0007-8354-1628"
+repository-code: "https://github.com/JoaquinDG/switchboard"
+license: MIT
+version: "0.3.0"
+date-released: "2026-08-15"
+keywords:
+  - large language models
+  - model routing
+  - cost optimization
+  - cross-model auditing
+  - LLM evaluation
+
+# Zenodo mints two DOIs: a concept DOI that always resolves to the newest
+# version, and a version DOI pinned to one deposit. The concept DOI is used
+# here so the citation does not go stale when a v2 is published; cite
+# 10.5281/zenodo.21953773 if you need this exact version.
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.21953772"
+    description: Concept DOI — always resolves to the latest version
+  - type: doi
+    value: "10.5281/zenodo.21953773"
+    description: Version DOI — the deposit of 2026-08-15
+
+preferred-citation:
+  type: article
+  title: >-
+    Stop Sending Everything to the Smartest Model: Policy-Based LLM Routing
+    with Cross-Model Auditing
+  authors:
+    - family-names: "Diaz Gutierrez de Quijano"
+      given-names: "Joaquin"
+      orcid: "https://orcid.org/0009-0007-8354-1628"
+  year: 2026
+  month: 8
+  publisher:
+    name: Zenodo
+  doi: "10.5281/zenodo.21953772"
+  url: "https://zenodo.org/records/21953773"
+  notes: "Preprint. CC BY 4.0."
