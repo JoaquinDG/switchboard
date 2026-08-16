@@ -43,6 +43,8 @@ class _HTTPProviderBase:
     """Shared transport: retries, backoff, and error translation."""
 
     name = "http"
+    # A real vendor call, not a canned reply. See Provider.synthetic in base.py.
+    synthetic = False
 
     def __init__(
         self,

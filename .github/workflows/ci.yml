@@ -47,6 +47,10 @@ jobs:
       - name: Planner evals
         run: PYTHONPATH=src python evals/planner_eval.py
 
+      # Must report "no measured data" rather than scoring mock outcomes.
+      - name: Catalog feedback refuses synthetic traces
+        run: PYTHONPATH=src python evals/catalog_feedback.py
+
       - name: Examples run offline
         run: |
           PYTHONPATH=src python examples/quickstart.py
