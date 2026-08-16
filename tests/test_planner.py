@@ -378,3 +378,137 @@ class HonestyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelPlannerTests(unittest.TestCase):
+    """The model layer must be optional, gated, and honest about failing."""
+
+    GOOD = ('{"confidence": 0.9, "rationale": "two kinds of work", "steps": ['
+            '{"step_id": "s1", "prompt": "extract the terms", "task_type": "extraction",'
+            ' "complexity": 0.3, "est_input_tokens": 500, "est_output_tokens": 200},'
+            '{"step_id": "s2", "prompt": "decide whether to sign", "task_type": "reasoning",'
+            ' "complexity": 0.7, "est_input_tokens": 300, "est_output_tokens": 400,'
+            ' "depends_on": ["s1"]}]}')
+    AMBIGUOUS = "Read this contract, extract the payment terms, and tell me if we should sign it."
+
+    def pool(self, *replies):
+        from switchboard import ProviderPool, ScriptedProvider
+
+        return ProviderPool([ScriptedProvider({"atlas-small": list(replies)}, name="mock")])
+
+    def registry(self):
+        from switchboard import demo_registry
+
+        return demo_registry()
+
+    def test_a_valid_model_plan_is_used_and_credited(self):
+        from switchboard.planner import plan_with_model
+
+        plan, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool(self.GOOD))
+        self.assertEqual(plan.planned_by, "model:atlas-small")
+        self.assertEqual(len(plan.steps), 2)
+        self.assertEqual(discarded, [])
+
+    def test_planning_uses_the_cheapest_model(self):
+        from switchboard import ProviderPool, ScriptedProvider
+        from switchboard.planner import plan_with_model
+
+        provider = ScriptedProvider({"atlas-small": [self.GOOD]}, name="mock")
+        plan_with_model(self.AMBIGUOUS, self.registry(), ProviderPool([provider]))
+        self.assertEqual(provider.calls[0][0], "atlas-small")
+
+    def test_one_repair_attempt_then_fall_back(self):
+        from switchboard.planner import plan_with_model
+
+        plan, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool("not json", "still not json"))
+        self.assertEqual(plan.planned_by, "heuristic")
+        self.assertEqual(len(discarded), 2)
+        self.assertFalse(discarded[0]["repair"])
+        self.assertTrue(discarded[1]["repair"])
+
+    def test_a_repair_that_succeeds_is_used(self):
+        from switchboard.planner import plan_with_model
+
+        plan, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool("garbage", self.GOOD))
+        self.assertEqual(plan.planned_by, "model:atlas-small")
+        self.assertEqual(len(discarded), 1)
+
+    def test_discarded_attempts_report_what_they_cost(self):
+        # A rejected plan was still generated and still billed.
+        from switchboard.planner import plan_with_model
+
+        _, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool("nope", "nope"))
+        self.assertTrue(all("cost_usd" in d for d in discarded))
+        self.assertTrue(all(d["cost_usd"] > 0 for d in discarded))
+
+    def test_a_failed_model_is_never_credited(self):
+        # The honesty rule: a trace saying "model:..." when the model produced
+        # nothing usable corrupts every downstream analysis of the traces.
+        from switchboard.planner import plan_with_model
+
+        plan, _ = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool("junk", "junk"))
+        self.assertEqual(plan.planned_by, "heuristic")
+
+    def test_an_invalid_model_plan_is_rejected_not_executed(self):
+        from switchboard.planner import plan_with_model
+
+        cycle = ('{"steps": [{"step_id": "s1", "prompt": "a", "task_type": "reasoning",'
+                 ' "complexity": 0.5, "est_input_tokens": 1, "est_output_tokens": 1,'
+                 ' "depends_on": ["s2"]}, {"step_id": "s2", "prompt": "b",'
+                 ' "task_type": "reasoning", "complexity": 0.5, "est_input_tokens": 1,'
+                 ' "est_output_tokens": 1, "depends_on": ["s1"]}]}')
+        plan, discarded = plan_with_model(
+            self.AMBIGUOUS, self.registry(), self.pool(cycle, cycle))
+        self.assertEqual(plan.planned_by, "heuristic")
+        self.assertTrue(any("cycle" in d["reason"] for d in discarded))
+
+    def test_provider_outage_falls_back_silently_to_the_heuristic(self):
+        from switchboard import ProviderPool, ProviderUnavailable, ScriptedProvider
+        from switchboard.planner import plan_with_model
+
+        pool = ProviderPool([ScriptedProvider(
+            {"atlas-small": [ProviderUnavailable("down")]}, name="mock")])
+        plan, _ = plan_with_model(self.AMBIGUOUS, self.registry(), pool)
+        self.assertEqual(plan.planned_by, "heuristic")
+
+
+class PlanGateTests(unittest.TestCase):
+    """Confidence decides whether the model is worth asking."""
+
+    def setUp(self):
+        from switchboard import BALANCED, ProviderPool, ScriptedProvider, demo_registry
+
+        self.registry = demo_registry()
+        self.provider = ScriptedProvider(
+            {"atlas-small": [ModelPlannerTests.GOOD]}, name="mock")
+        self.pool = ProviderPool([self.provider])
+        self.policy = BALANCED
+
+    def test_the_gate_opens_where_the_heuristic_says_it_cannot_judge(self):
+        from switchboard.planner import plan_request
+
+        plan, _ = plan_request(
+            ModelPlannerTests.AMBIGUOUS, self.registry, self.pool, self.policy,
+            use_model=True)
+        self.assertTrue(plan.planned_by.startswith("model:"))
+
+    def test_a_confident_heuristic_does_not_pay_for_a_plan(self):
+        from switchboard.planner import plan_request
+
+        plan, _ = plan_request(
+            "Summarize this memo.", self.registry, self.pool, self.policy, use_model=True)
+        self.assertEqual(plan.planned_by, "heuristic")
+        self.assertEqual(self.provider.calls, [])
+
+    def test_the_model_is_never_consulted_unless_asked(self):
+        from switchboard.planner import plan_request
+
+        plan, _ = plan_request(
+            ModelPlannerTests.AMBIGUOUS, self.registry, self.pool, self.policy)
+        self.assertEqual(plan.planned_by, "heuristic")
+        self.assertEqual(self.provider.calls, [])

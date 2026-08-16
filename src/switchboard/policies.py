@@ -98,6 +98,12 @@ class Policy:
     # produces confidently wrong later steps. When it does truncate, the
     # truncation is named in the step's trace event rather than swallowed.
     plan_context_cap_chars: int = 24_000
+    # Audit the ASSEMBLED answer against the ORIGINAL request, once, after the
+    # steps finish. Per-step audits cannot see coherence: every step can pass
+    # on its own and the assembled answer still not address what was asked.
+    # Off by default because it is a whole extra audit on the largest artefact
+    # the plan produced.
+    plan_final_audit: bool = False
     # How many times the broker may reroute to the next-ranked model when a
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.

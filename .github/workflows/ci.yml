@@ -52,6 +52,7 @@ jobs:
           PYTHONPATH=src python examples/quickstart.py
           PYTHONPATH=src python examples/agentic_workflow.py
           PYTHONPATH=src python examples/agentic_workflow.py --catalog examples/starter_catalog.json
+          PYTHONPATH=src python examples/agentic_workflow.py --plan
 
       - name: Package builds
         run: |

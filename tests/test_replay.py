@@ -224,3 +224,54 @@ class ExecutionSemanticsTests(ReplayHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanLevelAuditTests(ReplayHarness):
+    """Per-step audits cannot see whether the assembled answer is coherent."""
+
+    def policy(self, **kw):
+        from switchboard import Policy
+
+        return Policy("audited", 0.5, 0.3, 0.2, plan_final_audit=True, **kw)
+
+    def test_off_by_default(self):
+        live, _, _ = self.run_plan_traced()
+        self.assertIsNone(live.final_audit)
+
+    def test_when_on_it_audits_the_assembled_answer(self):
+        live, _, _ = self.run_plan_traced(policy=self.policy())
+        self.assertIsNotNone(live.final_audit)
+        self.assertTrue(live.final_audit.auditor_model)
+
+    def test_its_cost_lands_in_the_plan_total(self):
+        plain, _, _ = self.run_plan_traced()
+        audited, _, _ = self.run_plan_traced(policy=self.policy())
+        self.assertGreater(audited.routed_cost_usd, plain.routed_cost_usd)
+
+    def test_a_failed_plan_audit_makes_the_plan_unverified(self):
+        # Every step can pass on its own and the assembled answer still not
+        # address what was asked. That is the whole point of the extra audit.
+        # Keyed on WHICH audit rather than on call ordering: the plan-level
+        # audit is the only one whose prompt carries the whole original
+        # request, so the test does not silently break when the step count
+        # changes.
+        from switchboard import Completion
+
+        class PassStepsFailPlan:
+            name = "mock"
+
+            def complete(self, model_id, prompt, max_tokens=1024):
+                if "You are auditing" in prompt:
+                    whole = COMPOUND in prompt
+                    verdict = (
+                        '{"pass": false, "score": 0.1, "issues": ["does not answer it"]}'
+                        if whole else '{"pass": true, "score": 0.9, "issues": []}'
+                    )
+                    return Completion(verdict, model_id, 20, 20)
+                return Completion("step output", model_id, 20, 20)
+
+        live, _, _ = self.run_plan_traced(
+            provider=PassStepsFailPlan(), policy=self.policy())
+        self.assertTrue(all(s.result.verified for s in live.steps))
+        self.assertFalse(live.final_audit.passed)
+        self.assertFalse(live.verified)

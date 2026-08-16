@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 285 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 300 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 8 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -248,7 +248,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 285 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 300 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -277,6 +277,61 @@ Integration tests are opt-in twice over — `SWITCHBOARD_LIVE_TESTS=1` **and** t
 ```bash
 SWITCHBOARD_LIVE_TESTS=1 PYTHONPATH=src python3 -m unittest tests.test_live
 ```
+
+## Compound requests: the planner
+
+```bash
+PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json --plan
+```
+
+One sentence in, a routed and audited pipeline out:
+
+```
+request: Pull the competitor pricing out of these five saved pages, then summarise the
+         findings into a comparison brief, then recommend our pricing response with
+         tradeoffs, and finally write the new landing page copy.
+
+plan: 4 steps (heuristic, confidence 0.75)
+  s1 extraction     cx=0.3   -> deepseek-v4-flash   no upstream context     verified=True
+  s2 summarization  cx=0.3   -> deepseek-v4-flash   <- s1 (88c)             verified=True
+  s3 reasoning      cx=0.65  -> deepseek-v4-pro     <- s2 (111c)            verified=True
+  s4 creative       cx=0.45  -> deepseek-v4-flash   <- s3 (109c)            verified=True
+
+  routed:              $0.00414
+  best model per step: $0.00506
+  one frontier call:   $0.08380  on claude-opus-5  (MODELLED, not run)
+```
+
+That is the pipeline `examples/agentic_workflow.py` used to hand-write, inferred from prose. Run it without `--plan` to compare.
+
+### Two layers, gated on confidence
+
+Same architecture as triage, for the same reason. The **heuristic** is free, offline, deterministic and splits on explicit structure only — enumeration, ordinals, sequence connectives. Comma chains are not structure ("extract names, emails and phone numbers" is one extraction) and neither is length.
+
+Where several kinds of work are named but nothing marks the seams, it **declines to split and reports low confidence** rather than guessing. That is what opens the gate to the **model layer**, which runs on the cheapest model in the catalog, gets exactly one repair attempt if its JSON fails validation, and falls back to the heuristic on any failure.
+
+`planned_by` names the layer that actually decided. A model call that produced nothing usable is credited to the heuristic that rescued it, and the plan it wasted money on is reported in `discarded_attempts` rather than quietly absorbed.
+
+### Biased against splitting
+
+Over-splitting is the expensive error: extra calls, extra audits, extra latency, on work that needed one call. **False-split rate is 0% on 10 negatives and gates CI.** The negatives include the hardest one — long but single-task.
+
+### Execution
+
+Steps run in dependency order, each dispatched through `Broker.run()` **unchanged**: nothing bypasses triage, the gates, auditing, escalation or failover. A dependent step gets its predecessor's output under a labelled fence, and the routing estimate is re-derived at dispatch because injected context is real input someone pays for. Truncation at `Policy.plan_context_cap_chars` is **named in the trace**, never swallowed.
+
+`result.verified` means every step passed its own audit. That is not the same as the assembled answer being coherent — set `Policy.plan_final_audit=True` for one extra audit of the assembled result against the *original* request, which is the only check that can see whether the pipeline answered the question it was asked.
+
+### Replay
+
+Everything needed to reconstruct a plan run is in the trace — the plan, the dispatch order, what context went into which step, per-step outcomes, and the totals:
+
+```python
+from switchboard.replay import read_trace, replay_plans
+plans = replay_plans(read_trace("traces/workflow.jsonl"))
+```
+
+Proven by a side-by-side test that runs a plan, discards the objects, and compares the rebuild field by field. Plan events carry an `"event"` key; the per-task records that predate them do not and are unchanged, so old traces stay readable.
 
 ## Task-type inference
 
@@ -439,14 +494,17 @@ src/switchboard/
   policies.py        Task + Policy: the explicit tradeoff
   triage.py          bare prompt -> task_type + complexity, always labeled by layer
   prompts.py         audit + retry prompt text, single owner, no test-only markers
+  planner.py         compound request -> Plan; anti-split heuristic + gated model layer
+  replay.py          rebuild a whole plan run from the trace alone
   router.py          gates -> scoring -> explained decision (+ warnings)
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               285 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               300 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               8 routing scenarios, 40 triage prompts, 22 planner cases
-examples/            quickstart, agentic workflow, live_check/live_run/triage_ab, catalogs
+examples/            quickstart, agentic workflow (--plan), live_check/live_run,
+                     triage_ab/planner_ab, catalogs
 CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"
 ```
 

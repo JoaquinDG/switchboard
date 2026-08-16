@@ -35,6 +35,7 @@ from .registry import TIER_RANK, ModelSpec, Registry
 from .router import RoutingDecision, actual_cost, route, score_models
 from .planner import (
     Plan,
+    plan_request,
     validate_plan,
     PlanStep,
     PlanValidationError,
@@ -88,16 +89,27 @@ class PlanResult:
     baseline_single_call_usd: float = 0.0
     baseline_single_call_model: str = ""
     baseline_single_call_is_modelled: bool = True
+    # Model plans that failed validation. They were generated and billed, so
+    # they are reported rather than quietly absorbed.
+    discarded_attempts: list[dict] = field(default_factory=list)
+    # Set only when policy.plan_final_audit is on: one audit of the assembled
+    # answer against the original request.
+    final_audit: AuditVerdict | None = None
 
     @property
     def verified(self) -> bool:
         """True only if every step passed its own audit.
 
-        Deliberately strict and deliberately step-wise: v1 has no plan-level
-        audit, so this cannot speak to whether the assembled answer is
-        coherent — only that no individual step failed.
+        Strict and step-wise. Without `plan_final_audit` this says only that
+        no individual step failed — every step can pass on its own and the
+        assembled answer still not address the original request. With it on,
+        the coherence check must pass too.
         """
-        return bool(self.steps) and all(s.result.verified for s in self.steps)
+        if not self.steps or not all(s.result.verified for s in self.steps):
+            return False
+        if self.final_audit is not None:
+            return self.final_audit.passed
+        return True
 
     @property
     def is_split(self) -> bool:
@@ -230,6 +242,7 @@ class Broker:
         trace_path: str | Path | None = None,
         *,
         triage_use_model: bool = False,
+        plan_use_model: bool = False,
     ) -> None:
         self.registry = registry
         self.providers = providers
@@ -239,6 +252,9 @@ class Broker:
         # instead of using the offline heuristic. Off by default so the
         # library keeps working with no providers and no budget.
         self.triage_use_model = triage_use_model
+        # Opt-in: let a cheap model propose the decomposition when the
+        # heuristic reports it cannot judge. Off by default, like triage's.
+        self.plan_use_model = plan_use_model
 
     def run(self, task: Task) -> BrokerResult:
         """Route, execute, verify, and escalate or reroute as needed.
@@ -375,7 +391,11 @@ class Broker:
         bypasses triage, the gates, auditing, escalation or failover; the
         planner only decides what the units of work are.
         """
-        plan = self._resolve_plan(request)
+        plan, discarded = self._resolve_plan(request)
+        for attempt in discarded:
+            # A rejected plan still cost money. Trace it before anything else
+            # so the bill and the reason are both recoverable.
+            self._trace_event("attempt_discarded", dict(attempt))
         self._trace_event("plan_proposed", {
             "request": plan.request,
             "planned_by": plan.planned_by,
@@ -433,6 +453,18 @@ class Broker:
             })
 
         plan_result = self._finalize_plan(plan, results)
+        plan_result.discarded_attempts = list(discarded)
+        if self.policy.plan_final_audit and results:
+            plan_result.final_audit = self._audit_plan(plan, plan_result)
+            plan_result.routed_cost_usd += plan_result.final_audit.cost_usd
+            self._trace_event("plan_audited", {
+                "passed": plan_result.final_audit.passed,
+                "score": plan_result.final_audit.score,
+                "issues": list(plan_result.final_audit.issues),
+                "auditor_model": plan_result.final_audit.auditor_model,
+                "cross_lab": plan_result.final_audit.cross_lab,
+                "cost_usd": round(plan_result.final_audit.cost_usd, 8),
+            })
         self._trace_event("plan_completed", {
             "verified": plan_result.verified,
             "is_split": plan_result.is_split,
@@ -446,19 +478,22 @@ class Broker:
         })
         return plan_result
 
-    def _resolve_plan(self, request: str | Plan) -> Plan:
+    def _resolve_plan(self, request: str | Plan) -> tuple[Plan, list[dict]]:
         """Validate a supplied plan, or build one; fail closed to single-task."""
         if isinstance(request, Plan):
             validate_plan(request)  # supplied plans get no special treatment
-            return request
+            return request, []
         try:
-            return plan_heuristic(request)
+            return plan_request(
+                request, self.registry, self.providers, self.policy,
+                use_model=self.plan_use_model,
+            )
         except PlanValidationError as e:
             # A planner that cannot produce a usable plan must not take the
             # request down with it. Degrade to routing the whole thing as one
             # task and say so, rather than failing the caller's request.
             self._trace_event("plan_degraded", {"reason": str(e), "request": request})
-            return no_split_plan(request, f"planner failed ({e}); routed as one task")
+            return no_split_plan(request, f"planner failed ({e}); routed as one task"), []
 
     def _thread_context(
         self, step: PlanStep, outputs: dict[str, str], cap: int
@@ -511,6 +546,35 @@ class Broker:
             baseline_single_call_usd=single,
             baseline_single_call_model=strongest.model_id,
         )
+
+    def _audit_plan(self, plan: Plan, result: PlanResult) -> AuditVerdict:
+        """One audit of the assembled answer against the ORIGINAL request.
+
+        Per-step audits each judge a fragment against its own fragment of the
+        brief. None of them can see whether the assembled answer actually
+        addresses what was asked — that is a different question, and it needs
+        the original request in front of it.
+        """
+        producer = self.registry.get(result.steps[-1].result.final_model)
+        assembled = Completion(
+            text=result.final_text,
+            model_id=producer.model_id,
+            input_tokens=0,
+            output_tokens=0,
+        )
+        try:
+            return audit(
+                Task(prompt=plan.request, task_type=plan.steps[-1].task_type,
+                     complexity=max(s.complexity for s in plan.steps)),
+                assembled, producer, self.registry, self.providers, self.policy,
+            )
+        except ProviderError as e:
+            # Same rule as a per-step audit: verification that cannot run has
+            # not passed.
+            return AuditVerdict(
+                passed=False, score=0.0,
+                issues=[f"plan-level auditor unavailable ({e}); failing closed"],
+            )
 
     def _trace_event(self, event: str, payload: dict) -> None:
         """Append a named plan event to the same JSONL stream.

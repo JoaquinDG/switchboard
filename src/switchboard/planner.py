@@ -47,6 +47,8 @@ from .triage import TASK_TYPES, classify_heuristic
 
 __all__ = [
     "MAX_STEPS",
+    "plan_request",
+    "plan_with_model",
     "Plan",
     "PlanStep",
     "PlanValidationError",
@@ -592,6 +594,137 @@ def plan_heuristic(
     )
     validate_plan(plan)
     return plan
+
+
+_PLANNER_PROMPT = """Break this request into the fewest steps that each need a
+different KIND of work. If it is really one job, return exactly one step.
+
+Splitting costs money: every step is a separate model call with its own audit.
+Only split where the kind of work genuinely changes.
+
+task_type must be one of: {types}
+complexity is 0-1: 0.2 a lookup, 0.5 ordinary professional work, 0.9 genuinely hard.
+depends_on lists the step_ids whose OUTPUT this step needs.
+
+Respond with ONLY this JSON object, no prose, no markdown fences:
+{{"confidence": 0.0-1.0, "rationale": "why you split it this way (or did not)",
+  "steps": [{{"step_id": "s1", "prompt": "...", "task_type": "...",
+              "complexity": 0.0-1.0, "est_input_tokens": 0,
+              "est_output_tokens": 0, "depends_on": []}}]}}
+
+Step ids must be s1, s2, ... in order. At most {max_steps} steps.
+
+REQUEST:
+{request}
+"""
+
+_REPAIR_SUFFIX = """
+
+Your previous reply was rejected: {reason}
+
+Return corrected JSON in exactly the schema above, and nothing else."""
+
+
+def _cheapest(registry):
+    """Planning is a classification, not the work. Never frontier by default."""
+    return min(registry.all(), key=lambda m: (m.output_cost, m.input_cost))
+
+
+def plan_with_model(
+    request: str,
+    registry,
+    providers,
+    policy=None,
+    *,
+    model_id: str | None = None,
+    fallback: Plan | None = None,
+) -> tuple[Plan, list[dict]]:
+    """Ask a cheap model to decompose, with exactly one repair attempt.
+
+    Returns the plan and any discarded attempts — a rejected reply was still
+    generated and still billed, so it is reported rather than quietly absorbed.
+
+    On any failure the fallback plan stands, and `planned_by` says
+    ``heuristic``. A model that did not produce a usable plan gets no credit
+    for the one that ran instead; that is the same honesty rule triage follows,
+    and it is what keeps trace analysis meaningful.
+    """
+    from .router import actual_cost  # local: avoids a cycle at import time
+
+    heuristic = fallback if fallback is not None else plan_heuristic(request)
+    discarded: list[dict] = []
+    try:
+        spec = registry.get(model_id) if model_id else _cheapest(registry)
+        provider = providers.get(spec.provider)
+    except Exception as e:  # noqa: BLE001 - planning must never take a run down
+        return with_planned_by(heuristic, "heuristic"), discarded
+
+    prompt = _PLANNER_PROMPT.format(
+        types=list(TASK_TYPES), max_steps=MAX_STEPS, request=request
+    )
+    for attempt in range(2):  # first try, then exactly one repair
+        try:
+            reply = provider.complete(spec.model_id, prompt)
+        except Exception as e:  # noqa: BLE001
+            discarded.append({
+                "model_id": spec.model_id, "reason": f"{type(e).__name__}: {e}",
+                "cost_usd": 0.0, "repair": attempt == 1,
+            })
+            break
+        try:
+            plan = parse_plan(reply.text, request, f"model:{spec.model_id}")
+            return plan, discarded
+        except PlanValidationError as e:
+            discarded.append({
+                "model_id": spec.model_id,
+                "reason": str(e),
+                "input_tokens": reply.input_tokens,
+                "output_tokens": reply.output_tokens,
+                "cost_usd": actual_cost(spec, reply.input_tokens, reply.output_tokens),
+                "repair": attempt == 1,
+                "raw": reply.text[:400],
+            })
+            if attempt == 1:
+                break
+            prompt = prompt + _REPAIR_SUFFIX.format(reason=e)
+
+    return with_planned_by(heuristic, "heuristic"), discarded
+
+
+def plan_request(
+    request: str,
+    registry=None,
+    providers=None,
+    policy=None,
+    *,
+    use_model: bool = False,
+    est_input_tokens: int | None = None,
+    est_output_tokens: int | None = None,
+) -> tuple[Plan, list[dict]]:
+    """Plan a request, consulting a model only where the heuristic is unsure.
+
+    Confidence-gated for the same reason triage is: the heuristic is free and
+    right most of the time, and paying a model to re-decide a call it already
+    made confidently buys latency and nothing else. The gate opens exactly
+    where the heuristic says it cannot judge — several kinds of work named
+    with no structure marking the seams.
+    """
+    heuristic = plan_heuristic(
+        request,
+        est_input_tokens=est_input_tokens,
+        est_output_tokens=est_output_tokens,
+    )
+    threshold = getattr(policy, "plan_confidence_threshold", 0.25)
+    if (
+        use_model
+        and registry is not None
+        and providers is not None
+        and heuristic.confidence < threshold
+    ):
+        return plan_with_model(
+            request, registry, providers, policy, fallback=heuristic
+        )
+    return heuristic, []
 
 
 def with_planned_by(plan: Plan, planned_by: str) -> Plan:

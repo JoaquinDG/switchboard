@@ -24,6 +24,8 @@ from .planner import (
     no_split_plan,
     parse_plan,
     plan_heuristic,
+    plan_request,
+    plan_with_model,
     topological_order,
     validate_plan,
 )
@@ -144,6 +146,8 @@ __all__ = [
     "replay_plans",
     "parse_plan",
     "plan_heuristic",
+    "plan_request",
+    "plan_with_model",
     "pick_auditor",
     "route",
     "task_records",
