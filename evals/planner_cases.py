@@ -125,8 +125,8 @@ COMPOUND_UNMARKED: tuple[Case, ...] = (
         "Take these support tickets, work out which themes are growing, write "
         "me something I can send to the team.",
         True, ("reasoning", "creative"),
-        "heuristic is confidently WRONG: 0.95, so the gate never opens — a "
-        "blind spot, not a known unknown",
+        "was a blind spot (scored 0.95, confidently wrong) until the work-verb "
+        "vocabulary learned 'work out' and 'write me/us'; now 0.20, gate opens",
     ),
 )
 

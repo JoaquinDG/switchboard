@@ -338,8 +338,14 @@ _WORK_VERBS = {
     "extraction": r"\b(?:extract|parse|pull|scrape|list all|find all)\b",
     "summarization": r"\b(?:summari[sz]e|condense|recap|boil down|tl;?dr)\b",
     "coding": r"\b(?:refactor|debug|implement|write (?:a |the )?(?:function|script|handler|test|query))\b",
-    "creative": r"\b(?:draft|write (?:the |a )?(?:copy|post|story|email|page)|brainstorm)\b",
-    "reasoning": r"\b(?:recommend|evaluate|decide|assess|analy[sz]e|compare|tell me (?:if|whether)|should we)\b",
+    "creative": r"\b(?:draft|write (?:the |a |me |us )?(?:copy|post|story|email|page|something)|brainstorm)\b",
+    # "work out" / "figure out" are ordinary phrasings for the same judgement
+    # work as "recommend" or "assess" — measured missing on a case that scored
+    # confidently single-task (0.95) while actually being two jobs (ROADMAP 1c).
+    "reasoning": (
+        r"\b(?:recommend|evaluate|decide|assess|analy[sz]e|compare|"
+        r"tell me (?:if|whether)|should we|work(?:ed)? out|figure out)\b"
+    ),
 }
 
 _MIN_FRAGMENT_WORDS = 3

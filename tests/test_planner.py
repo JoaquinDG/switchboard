@@ -306,6 +306,18 @@ class ConfidenceGateTests(unittest.TestCase):
         )
         self.assertTrue(any("work-kinds" in s for s in p.signals))
 
+    def test_formerly_blind_unmarked_compound_now_reports_low_confidence(self):
+        """ROADMAP 1c: this request scored 0.95 (confidently wrong) before the
+        work-verb vocabulary learned 'work out' and 'write me/us' — the gate
+        never opened even though this is genuinely two jobs."""
+        p = plan_heuristic(
+            "Take these support tickets, work out which themes are growing, "
+            "write me something I can send to the team."
+        )
+        self.assertFalse(p.is_split)
+        self.assertLess(p.confidence, 0.25)
+        self.assertIn("declining to guess", p.rationale)
+
 
 class ParsePlanTests(unittest.TestCase):
     """Tolerant about transport, strict about meaning."""
