@@ -4,6 +4,10 @@ The working backlog, in priority order. **This file is the single source of trut
 
 Reorder freely. Add items freely. Tick a box when the work lands on `main`.
 
+**Claimed items.** An item marked `[~]` and **CLAIMED** is being built right now
+in an interactive session. The scheduled agent must skip it and take the next
+unclaimed one, or two people build the same thing twice.
+
 ## How to read an item
 
 Each entry states **why it matters** (the gap it closes), **done looks like** (acceptance criteria), and where relevant a **trap** — a way of satisfying the letter of the item while making the repo worse. The traps are the important part. Most of these items have an easy wrong version.
@@ -17,6 +21,95 @@ These are not negotiable and apply to all work below:
 - Honest claims only. Estimated is never presented as measured; mocked is never presented as real.
 - New routing logic extends the rationale string and the ranked list. It never bypasses them.
 - One logical change per PR.
+
+---
+
+## Tier 0 — make it usable
+
+Added after a non-technical reader asked three questions the repo could not
+answer: *how do I use it, does it run in the background, and what if my task
+has several tasks inside it?* All three were fair. The first two are packaging
+problems; the third is a real hole in the thesis.
+
+### U1. Say who it is for — **DONE**
+- [x] README now opens with "Is this for me?", which states plainly that
+  Switchboard sits between *your code* and the vendor APIs, that a flat
+  subscription has no routing decision in it, and that a reader using
+  ChatGPT or Claude through their apps is not the user.
+- **Why it mattered:** the honest answer to "how do I use it" is sometimes
+  "you don't". A repo that trades on honesty should say so before someone
+  spends an afternoon finding out.
+
+### U2. OpenAI-compatible local proxy — `[~]` **CLAIMED**
+- [~] **Why it matters:** the integration today is "write Python and construct
+  a Registry". A proxy exposing `/v1/chat/completions` on localhost lets any
+  existing tool — an SDK, an editor, a framework — get routing, cross-lab
+  auditing and cost accounting by changing one base URL and no code. This is
+  the single largest adoption unlock available, and it costs no dependencies:
+  `http.server` is in the stdlib.
+- **Done looks like:** `switchboard serve`; a request to `/v1/chat/completions`
+  routes through triage + router + broker and returns an OpenAI-shaped
+  response; routing rationale and cost returned in headers or an extension
+  field; `/v1/models` lists the catalog. Offline test coverage with no sockets
+  to real vendors.
+- **Trap — auditing and streaming are incompatible.** You cannot audit a
+  response you have not finished receiving. Either refuse `stream: true`, or
+  serve it with audits disabled and say so in the response. Silently dropping
+  verification while still reporting success would be the worst option, and it
+  is the easy one.
+- **Second trap:** auditing doubles latency, which is fine in a batch job and
+  unusable in an editor. Default audits **off** in the proxy and make them
+  opt-in per request; the library default stays on.
+
+### U3. Composite tasks — decomposition — **DONE (v1)**
+- [x] Shipped: `planner.py` (Plan schema, strict validation, anti-split heuristic), `Broker.run_plan` (dependency-ordered dispatch through the unchanged broker path, context threading with named truncation, three labelled cost figures), `replay.py` (full reconstruction from trace alone), `evals/planner_eval.py` (22 labeled cases, false-split rate 0%, in CI).
+- **What it changed about the thesis:** the eval showed decomposition is a *correctness* mechanism first. Routing a compound request whole under-routed it 42% of the time — cheaper, but below the tier its hardest sub-task needs, and invisible to the qualification gate. See the README findings.
+- **Also shipped:** gated model planner with repair-once and honest fallback (`plan_with_model`), `examples/planner_ab.py`, `--plan` on the agentic example, and the optional plan-level final audit behind `Policy.plan_final_audit`.
+- **Measured (examples/planner_ab.py, live):** the model layer never over-splits (0 false splits at every threshold) and rescues unmarked compounds the heuristic declines. Gating at 0.25 catches 1 of 2 for one model call; asking always catches 2 of 2 for 24 calls and 312s.
+- **Known limit:** confidence gating is bounded by the heuristic's self-knowledge. One unmarked compound scores 0.20 (gate opens, model rescues it); the other scores 0.95 while being wrong, so the gate never opens. Widening the work-verb vocabulary would help; a learned confidence would help more. Tracked as its own item below.
+- **Deferred to v2:** parallel execution of independent steps (blocked on async), step-output summarisation for long chains, and recursive planning.
+- **Original rationale:** measured, not hypothesised. Switchboard routes one
+  task to one model, so a composite request routes at its *hardest* sub-task
+  and everything runs at frontier prices: the four-part example in the README
+  costs **$0.1600 as one task vs $0.0545 as four — 2.9x**. Triage does not
+  catch it either. "Read this contract, extract the payment terms, and tell me
+  if we should sign it" classifies as `extraction, complexity 0.30` with
+  **confidence 1.00**, and the confidence gate cannot help because it guards
+  against *no signal*, not *several signals*. The headline savings therefore
+  depend on a decomposition the library does not perform — `agentic_workflow.py`
+  hand-writes its five steps.
+- **Done looks like:** a `Plan` layer that splits a request into steps, routes
+  each one, threads outputs between them, and reports the plan alongside the
+  result. Measured against routing the same request whole.
+- **Trap:** keep it out of the router. The router routes; planning is a
+  separate concern with a different failure mode, and folding them together
+  makes both untestable.
+- **Second trap:** an LLM planner is unreliable in exactly the way triage is,
+  so it gets the same treatment — show the plan, name the layer that produced
+  it, and let the caller approve or override before anything is spent.
+- **Third:** a step-wise plan also makes audits cheaper to repair. One verdict
+  on a four-part answer fails the whole thing for one bad part and re-runs
+  everything; per-step audits repair only the step that failed.
+
+### U4. A one-line CLI — **DONE**
+- [x] Shipped as `switchboard.cli:main`, wired up via `[project.scripts]` in
+  `pyproject.toml`. `switchboard "prompt"` triages (auto by default,
+  `--task-type` to skip it), routes, runs, and prints the rationale, verdict,
+  and full cost breakdown against the built-in demo catalog — no keys, no
+  script, no `PYTHONPATH` juggling once installed.
+- **How "dry-run by default" was read:** the default run executes the full
+  `Broker.run` pipeline (triage, routing, audit, escalation) against
+  `MockProvider`, so routing, auditing and cost accounting are the real
+  logic — only the generated text is canned, and the output says so.
+  Nothing is billed or sent over the network unless `--live` is passed, and
+  `--live` refuses to run without both a keyed provider and an explicit
+  `--budget-usd > 0`, mirroring `examples/live_run.py`'s worst-case cost
+  guard so a single mistyped flag can't produce a surprise bill.
+- **Tests:** `tests/test_cli.py` — default mocked run, forced `--task-type`
+  skips triage, custom catalog loading, opt-in tracing, and three
+  live-mode safety tests (no budget, no keys, budget of zero) that assert no
+  provider is ever touched, run with provider keys scrubbed from the
+  environment so the test can't pass by accident.
 
 ---
 
@@ -34,11 +127,24 @@ These are the highest-value items because each one fixes something the repo curr
 - **Note:** generate real traces first with `examples/live_run.py --live`; `traces/` is gitignored, so a fresh checkout has none. Running the offline examples also produces traces, but their audit outcomes are canned and must not be scored.
 - **Trap:** do not auto-write scores back into the catalog from a handful of samples. Report the numbers *and the sample size*, and say plainly when `n` is too small to act on. A confidently wrong measured score is worse than an honestly labelled estimate.
 
-### 1b. Scoring terms are not on comparable scales
-- [ ] **Why it matters:** cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. Measured on the starter catalog for `extraction`: capability ranges 0.78-0.90 (spread 0.12, so an 0.85 weight buys 0.102 of influence) while latency spans 0.20-1.00 (spread 0.80, so an 0.10 weight buys 0.080). The weights do not mean what they say. Concretely, `quality_first` on `reasoning@0.6` picks `gemini-3.7-flash` (capability 0.84, fast) over `claude-opus-5` (0.95, slow): a 0.093 quality advantage loses to an 0.080 latency advantage. A policy named quality-first should not do that.
+### 1b. Scoring terms are not on comparable scales — **DONE**
+- [x] **Why it matters:** cost and latency are normalized to span [0, 1]; capability is used raw and clusters tightly. Measured on the starter catalog for `extraction`: capability ranges 0.78-0.90 (spread 0.12, so an 0.85 weight buys 0.102 of influence) while latency spans 0.20-1.00 (spread 0.80, so an 0.10 weight buys 0.080). The weights do not mean what they say. Concretely, `quality_first` on `reasoning@0.6` picks `gemini-3.7-flash` (capability 0.84, fast) over `claude-opus-5` (0.95, slow): a 0.093 quality advantage loses to an 0.080 latency advantage. A policy named quality-first should not do that.
 - **Done looks like:** the weights behave as advertised, demonstrated on both the 3-model demo catalog and the 16-model starter catalog, with the routing evals still passing.
 - **Trap — this one has already been walked into.** The obvious fix is to min-max normalize capability the way cost is normalized. It works on a wide catalog and *breaks on a narrow one*: with three models spanning 0.78-0.88, normalizing turns a 0.10 capability difference into a full 0.0-to-1.0 swing, and `balanced` starts sending easy extraction to the frontier model. That is the same artifact already fixed for cost ("with two candidates one is always 0.0"), reintroduced on another axis. Capability is a genuinely absolute 0-1 quantity; its observed range in a given catalog is not a meaningful denominator.
 - **Other directions worth trying:** narrow the latency score spread (currently fast=1.0 / medium=0.6 / slow=0.2); normalize against the full 0-1 capability scale rather than the observed range; or leave scoring alone and recalibrate the preset weights, accepting that weights are catalog-dependent and saying so.
+- **Shipped as:** `router._quality_score` in `router.py`, anchoring capability's normalization on `UNKNOWN_CAPABILITY_PRIOR` (0.5) instead of the observed candidate range. This is *not* the rejected fix: the floor is a fixed catalog-wide constant — no honest catalog rates a real model below "no idea" — not a function of who else is competing for this task, so it doesn't reintroduce the candidate-count artifact. Verified: `quality_first` on `reasoning@0.6` now picks `claude-opus-5` over `gemini-3.7-flash` on the 16-model starter catalog (`tests/test_router.py::QualityScoreScaleTests`, `evals/routing_eval.py`), and the narrow 3-model demo catalog still keeps easy extraction cheap under `cost_first` — the exact case the rejected fix broke.
+
+### 1c. The planner's confidence has blind spots
+- [ ] **Why it matters:** the model gate can only fire where the heuristic reports low confidence, and measured on unmarked compound requests it is right about its own uncertainty half the time. "Read this contract, extract the payment terms, and tell me if we should sign it" scores 0.20 and the gate rescues it. "Take these support tickets, work out which themes are growing, write me something I can send" scores **0.95 while being wrong**: no connective, and the phrasings match none of the work-verb patterns, so it sees one job and is sure of it. A blind spot is worse than a known unknown.
+- **Done looks like:** the unmarked-compound gate-fire rate in `planner_eval.py` improves without the false-split rate moving off 0.
+- **Trap:** do not fix this by lowering the confidence the heuristic reports across the board. That opens the gate everywhere, which is "model always" with extra steps — measured at 24 calls and 312s to gain one case.
+
+### 1d. A verified step can be worthless to everything downstream
+- [ ] **Why it matters:** measured live. Asked for data absent from the source, every model correctly refused to fabricate and the auditor correctly passed each refusal — then the plan spent **$0.02531 producing three variations of "that data is not here"**. `plan_halt_dependents_on_failure` cannot help: nothing failed. The auditor named it, scoring the second step 0.72 with "adds no value over step s1 — essentially a verbatim restatement, so the step is redundant", but `verified` is a boolean and 0.72 clears the 0.70 threshold.
+- **Done looks like:** a plan stops paying for steps that can only restate their input, without ever suppressing a step that had something to add.
+- **Trap:** the obvious fix — raise `audit_pass_threshold` so 0.72 fails — makes every borderline-but-useful answer fail too. The signal is not "low score", it is "this output adds nothing over its input", and those are different measurements.
+- **Second trap:** do not detect it with string similarity between a step's output and its injected context. A correct summarisation legitimately restates its input; the difference is whether it *adds* anything, which similarity cannot see.
+- **Worth trying:** the auditor already produces the judgement in prose. Asking it for a structured `adds_value` field alongside `pass` is one call's worth of change and needs no new machinery.
 
 ### 2. Context-window awareness in routing
 - [ ] **Why it matters:** `ModelSpec.context_window` is stored, validated, and **never read by the router** (verified: no reference outside `registry.py`). A task with 400k estimated input tokens can be routed today to a 200k model, which fails at the provider with a hard error rather than being caught as a routing constraint.

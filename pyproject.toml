@@ -12,6 +12,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+switchboard = "switchboard.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

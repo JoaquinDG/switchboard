@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from switchboard import BALANCED, COST_FIRST, QUALITY_FIRST, Task, demo_registry, route
+from switchboard import BALANCED, COST_FIRST, QUALITY_FIRST, Registry, Task, demo_registry, route
+
+STARTER_CATALOG = Path(__file__).resolve().parent.parent / "examples" / "starter_catalog.json"
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,11 @@ class Scenario:
     forbid_latency: str | None = None
     expect_underqualified: bool | None = None
     expect_warning: str | None = None  # substring match
+    # Defaults to the 3-model demo registry; pass "starter" to run against
+    # the 16-model examples/starter_catalog.json instead. ROADMAP item 1b's
+    # scale bug only showed up on the wider catalog, so its regression
+    # scenario needs to run there specifically.
+    registry_name: str = "demo"
 
     def check(self, decision) -> list[str]:
         """Return the reasons this scenario failed, empty if it passed."""
@@ -113,15 +121,30 @@ SCENARIOS = [
         expect_underqualified=True,
         expect_warning="no model clears capability",
     ),
+    # --- ROADMAP 1b: quality's weight has to outweigh what its number says --
+    # README Finding 3 measured this exact case going the wrong way: a 0.093
+    # raw-capability advantage for claude-opus-5 lost to gemini-3.7-flash's
+    # 0.080 latency advantage, because raw capability clusters near the top
+    # of [0, 1] while cost/latency use their full range. Only showed up on
+    # the 16-model starter catalog — the 3-model demo catalog's capability
+    # gaps happened to be wide enough to already win.
+    Scenario(
+        "quality_first is not swayed by a latency win the way it used to be",
+        Task(prompt="deep reasoning task", task_type="reasoning", complexity=0.6),
+        "quality_first",
+        expect_model="claude-opus-5",
+        registry_name="starter",
+    ),
 ]
 
 
 def run() -> int:
-    registry = demo_registry()
+    registries = {"demo": demo_registry(), "starter": Registry.from_json(STARTER_CATALOG)}
     failures = 0
     print(f"{'scenario':<62} {'policy':<14} {'chose':<16} result")
     print("-" * 104)
     for sc in SCENARIOS:
+        registry = registries[sc.registry_name]
         decision = route(sc.task, registry, POLICIES[sc.policy_name])
         problems = sc.check(decision)
         failures += 1 if problems else 0

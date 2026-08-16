@@ -205,7 +205,9 @@ def audit(
         prompt=task.prompt,
         output=output.text,
     )
-    result = provider.complete(auditor_spec.model_id, prompt)
+    result = provider.complete(
+        auditor_spec.model_id, prompt, max_tokens=policy.max_output_tokens
+    )
     passed, score, issues = _parse_verdict(result.text)
 
     if output.truncated:

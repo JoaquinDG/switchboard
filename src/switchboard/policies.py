@@ -67,6 +67,13 @@ class Policy:
     # *upward* (restrict to the highest tier available) rather than opening
     # the field back up to the whole catalog.
     on_no_qualified_model: str = "escalate_tier"
+    # Output ceiling for every generation and audit call the broker makes.
+    # The Provider protocol defaults to 1024, which measurement showed is too
+    # low three separate times: a reasoning model spends thinking tokens from
+    # this same budget before it emits anything, so 1024 can produce ZERO
+    # visible characters. Observed: claude-opus-5 burned 340 of 400 thinking;
+    # deepseek-v4-flash emitted nothing at 1024 and valid JSON at 3000.
+    max_output_tokens: int = 2_000
     # Audit settings
     audit_enabled: bool = True
     audit_pass_threshold: float = 0.7
@@ -90,6 +97,29 @@ class Policy:
     # model layer's accuracy on ~12% of the calls. Set to 0.0 to never ask a
     # model, or above 1.0 to always ask.
     triage_confidence_threshold: float = 0.25
+    # Planner: ask a model to decompose only when the heuristic's confidence
+    # falls below this. Same shape and same reasoning as triage's gate.
+    plan_confidence_threshold: float = 0.25
+    # Characters of a prior step's output threaded into a dependent step.
+    # Generous by default: truncating context silently is how a pipeline
+    # produces confidently wrong later steps. When it does truncate, the
+    # truncation is named in the step's trace event rather than swallowed.
+    plan_context_cap_chars: int = 24_000
+    # Audit the ASSEMBLED answer against the ORIGINAL request, once, after the
+    # steps finish. Per-step audits cannot see coherence: every step can pass
+    # on its own and the assembled answer still not address what was asked.
+    # Off by default because it is a whole extra audit on the largest artefact
+    # the plan produced.
+    plan_final_audit: bool = False
+    # When a step ends unverified, skip the steps that DEPEND on it. Their
+    # input is output the system has already judged wrong, and they consume it
+    # as ground truth — measured, 58% of a run's spend happened after the
+    # failure was known, producing a confidently worded answer built on it.
+    # Independent steps still run: only dependents are poisoned.
+    #
+    # Set False to run every step regardless, which is the right choice when a
+    # partial answer from a later step is useful on its own.
+    plan_halt_dependents_on_failure: bool = True
     # How many times the broker may reroute to the next-ranked model when a
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
@@ -107,6 +137,7 @@ class Policy:
             ("capability_margin", self.capability_margin),
             ("audit_pass_threshold", self.audit_pass_threshold),
             ("min_auditor_capability", self.min_auditor_capability),
+            ("plan_confidence_threshold", self.plan_confidence_threshold),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{label} must be in [0, 1], got {value}")
@@ -114,6 +145,16 @@ class Policy:
             raise ValueError(
                 f"auditor_selection must be one of {AUDITOR_SELECTION_STRATEGIES}, "
                 f"got {self.auditor_selection!r}"
+            )
+        if not isinstance(self.plan_context_cap_chars, int) or self.plan_context_cap_chars < 0:
+            raise ValueError(
+                f"plan_context_cap_chars must be a non-negative int, "
+                f"got {self.plan_context_cap_chars!r}"
+            )
+        if not isinstance(self.max_output_tokens, int) or self.max_output_tokens < 1:
+            raise ValueError(
+                f"max_output_tokens must be a positive int, "
+                f"got {self.max_output_tokens!r}"
             )
         for label, value in (
             ("max_escalations", self.max_escalations),

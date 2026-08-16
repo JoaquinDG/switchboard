@@ -149,6 +149,22 @@ class _HTTPProviderBase:
                     provider=self.name,
                     model_id=model_id,
                 ) from None
+            except OSError as e:
+                # ConnectionResetError, BrokenPipeError and friends. These are
+                # OSErrors but NOT URLErrors: urllib wraps failures during
+                # connection *setup*, while a reset mid-response surfaces raw.
+                # Found live — a reset while reading an audit response escaped
+                # untyped, bypassing both this retry loop and the broker's
+                # failover, and took a whole plan run down with it. A dropped
+                # connection is the most ordinary transient failure there is;
+                # it belongs in the same bucket as a 503.
+                last = ProviderUnavailable(
+                    f"{self.name}: connection dropped for {model_id}: "
+                    f"{type(e).__name__}: {e}",
+                    provider=self.name,
+                    model_id=model_id,
+                )
+                retry_after = None
 
             if attempt < self.max_retries:
                 self._sleep(self._backoff(attempt, retry_after))
