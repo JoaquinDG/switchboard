@@ -10,7 +10,9 @@ Design principles:
 3. Gates degrade upward, never open. If a gate would leave zero candidates,
    the fallback is the most capable tier available plus a loud warning — not
    a silent return to the full catalog. Opening the field back up means cost
-   decides, which is exactly what the gate existed to prevent.
+   decides, which is exactly what the gate existed to prevent. The one
+   exception is the context-window gate: capacity has no "next best" tier to
+   degrade to, so it raises instead of guessing.
 4. Costs are normalized on a log scale, because model prices span orders of
    magnitude and a linear scale would make cost dominate every decision.
 5. Quality is normalized against a fixed floor (UNKNOWN_CAPABILITY_PRIOR),
@@ -24,7 +26,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .policies import NoQualifiedModelError, Policy, Task
+from .policies import ContextWindowExceededError, NoQualifiedModelError, Policy, Task
 from .registry import TIER_RANK, UNKNOWN_CAPABILITY_PRIOR, ModelSpec, Registry
 
 _LATENCY_SCORE = {"fast": 1.0, "medium": 0.6, "slow": 0.2}
@@ -85,6 +87,18 @@ def estimate_cost(task: Task, spec: ModelSpec) -> float:
 def actual_cost(spec: ModelSpec, input_tokens: int, output_tokens: int) -> float:
     """USD cost of a completed call, from observed token counts."""
     return (input_tokens * spec.input_cost + output_tokens * spec.output_cost) / 1_000_000
+
+
+def fits_context(task: Task, spec: ModelSpec) -> bool:
+    """True if spec's context window can hold this task's estimated tokens.
+
+    A hard capacity check, not a quality judgment: a model that cannot hold
+    the input has nothing to do with how good it is at the task. Public so
+    escalation (`Broker._escalation_target`) can apply the identical check —
+    the qualification gate learned that lesson already (ROADMAP item, see
+    `score_models`'s docstring) and this gate should not relearn it.
+    """
+    return spec.context_window >= task.est_input_tokens + task.est_output_tokens
 
 
 def _cost_score(cost: float, min_cost: float, max_cost: float) -> float:
@@ -183,6 +197,34 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
 
     gates: list[str] = []
     warnings: list[str] = []
+
+    # Gate 0: context window. Checked before every other gate because it is
+    # capacity, not quality — a model that cannot hold the estimated input
+    # plus output tokens is not a worse choice, it is not a choice, and no
+    # amount of cost or capability pressure should be able to route around
+    # it. It is a gate, never a weighted score (see module docstring).
+    needed_tokens = task.est_input_tokens + task.est_output_tokens
+    context_ok = [m for m in candidates if fits_context(task, m)]
+    if not context_ok:
+        # Unlike the frontier and qualification gates, there is no honest
+        # upward degrade here: a bigger tier is not necessarily a bigger
+        # context window, and handing the task to a model that will hard-fail
+        # at the provider is worse than refusing to route it at all.
+        raise ContextWindowExceededError(
+            f"no model in the registry has a context window >= {needed_tokens} "
+            f"estimated tokens (input {task.est_input_tokens} + output "
+            f"{task.est_output_tokens}); largest available is "
+            f"{max(m.context_window for m in candidates)}"
+        )
+    if len(context_ok) < len(candidates):
+        excluded = sorted(m.model_id for m in candidates if m not in context_ok)
+        gates.append("context window gate applied")
+        warnings.append(
+            f"context window gate excluded {', '.join(excluded)}: "
+            f"{needed_tokens} estimated tokens (input {task.est_input_tokens} + "
+            f"output {task.est_output_tokens}) exceeds their context window"
+        )
+    candidates = context_ok
 
     # A task type nobody has scored means every model returns the same prior,
     # so the quality term is dead weight and cost silently decides. That used
