@@ -19,16 +19,20 @@
     "",
     "LATENCY CLASSES are also estimates, assigned by tier rather than measured.",
     "",
-    "CONTEXT WINDOWS are set from vendor docs where the pricing page stated",
-    "them and left at a conservative 200000 otherwise. The router does not read",
-    "this field at all today; it is recorded for your own use."
+    "CONTEXT WINDOWS came from OpenRouter's public model index on 2026-08-16,",
+    "not from the vendor pages \u2014 a different and weaker provenance than the",
+    "prices above, recorded here so the difference is visible. They replaced",
+    "conservative placeholders that understated several models by 5x. The",
+    "router does not read this field yet (ROADMAP item 2); when it does, the",
+    "old placeholders would have excluded models that can do the work."
   ],
   "_sources": {
     "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
     "openai": "https://developers.openai.com/api/docs/pricing",
     "google": "https://ai.google.dev/gemini-api/docs/pricing",
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
-    "moonshot": "https://platform.kimi.ai/docs/pricing/chat-k3 (and sibling chat-k26 / chat-k27-code pages)"
+    "moonshot": "https://platform.kimi.ai/docs/pricing/chat-k3 (and sibling chat-k26 / chat-k27-code pages)",
+    "_context_windows": "https://openrouter.ai/api/v1/models (index, not vendor pages)"
   },
   "_provider_wiring": [
     "The 'provider' field must match a Provider name in your ProviderPool:",
@@ -54,7 +58,8 @@
     "  reflect this; the est_*_tokens on a Task do not.",
     "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing Switchboard does not model.",
     "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real.",
-    "A vendor listing a model in /models does not mean the chat endpoint accepts it. Verify with live_check.py --probe, which makes one 1-token call per model."
+    "A vendor listing a model in /models does not mean the chat endpoint accepts it. Verify with live_check.py --probe, which makes one 1-token call per model.",
+    "An independent index (OpenRouter) disagrees with six of these prices as of 2026-08-16 -- three by exactly half, which looks like a tier difference rather than a price change, and DeepSeek by more, on the day its dynamic peak/off-peak pricing began. Run examples/catalog_crosscheck.py to see the current disagreements. Only the vendor's own page settles them."
   ],
   "models": [
     {
@@ -137,7 +142,7 @@
       "input_cost": 5.0,
       "output_cost": 30.0,
       "latency": "slow",
-      "context_window": 200000,
+      "context_window": 1050000,
       "_source": "https://developers.openai.com/api/docs/pricing",
       "capabilities": {
         "reasoning": 0.94,
@@ -155,7 +160,7 @@
       "input_cost": 2.0,
       "output_cost": 12.0,
       "latency": "medium",
-      "context_window": 200000,
+      "context_window": 1050000,
       "_source": "https://developers.openai.com/api/docs/pricing",
       "capabilities": {
         "reasoning": 0.86,
@@ -173,7 +178,7 @@
       "input_cost": 0.2,
       "output_cost": 1.2,
       "latency": "fast",
-      "context_window": 200000,
+      "context_window": 1050000,
       "_source": "https://developers.openai.com/api/docs/pricing",
       "capabilities": {
         "reasoning": 0.66,
@@ -191,7 +196,7 @@
       "input_cost": 2.0,
       "output_cost": 12.0,
       "latency": "slow",
-      "context_window": 200000,
+      "context_window": 1048576,
       "_source": "https://ai.google.dev/gemini-api/docs/pricing",
       "_note": "Rate shown is the <=200k input tier; above 200k it is $4.00 in / $18.00 out.",
       "capabilities": {
@@ -210,7 +215,7 @@
       "input_cost": 0.75,
       "output_cost": 3.75,
       "latency": "fast",
-      "context_window": 200000,
+      "context_window": 1048576,
       "_source": "https://ai.google.dev/gemini-api/docs/pricing",
       "_note": "Promotional pricing through 2026-12-31; rises to $1.50 in / $7.50 out on 2027-01-01.",
       "capabilities": {
@@ -229,7 +234,7 @@
       "input_cost": 0.25,
       "output_cost": 1.5,
       "latency": "fast",
-      "context_window": 200000,
+      "context_window": 1048576,
       "_source": "https://ai.google.dev/gemini-api/docs/pricing",
       "_note": "Text/image/video input rate; audio input is $0.50. Replaced gemini-2.5-flash-lite, which is still listed by /models but returns 404 'no longer available' at the chat endpoint -- caught by live_check.py --probe on 2026-08-15.",
       "capabilities": {
@@ -248,7 +253,7 @@
       "input_cost": 0.435,
       "output_cost": 0.87,
       "latency": "medium",
-      "context_window": 1000000,
+      "context_window": 1048576,
       "_source": "https://api-docs.deepseek.com/quick_start/pricing",
       "_note": "Cache-miss input rate. Cache hits are cheaper; Switchboard does not model caching. The docs page labels the id 'DeepSeek-V4-Pro-0813', but the API serves the unversioned alias 'deepseek-v4-pro' -- verified against /models on 2026-08-15.",
       "capabilities": {
@@ -267,7 +272,7 @@
       "input_cost": 0.14,
       "output_cost": 0.28,
       "latency": "fast",
-      "context_window": 1000000,
+      "context_window": 1048576,
       "_source": "https://api-docs.deepseek.com/quick_start/pricing",
       "_note": "Cache-miss input rate. Docs label this 'DeepSeek-V4-Flash-0731'; the API serves 'deepseek-v4-flash'.",
       "capabilities": {
@@ -286,7 +291,7 @@
       "input_cost": 3.0,
       "output_cost": 15.0,
       "latency": "slow",
-      "context_window": 1000000,
+      "context_window": 1048576,
       "_source": "https://platform.kimi.ai/docs/pricing/chat-k3",
       "capabilities": {
         "reasoning": 0.92,
@@ -304,7 +309,7 @@
       "input_cost": 0.95,
       "output_cost": 4.0,
       "latency": "medium",
-      "context_window": 256000,
+      "context_window": 262144,
       "_source": "https://platform.kimi.ai/docs/pricing/chat-k27-code",
       "_note": "Coding specialist; scored above general mid models on coding only.",
       "capabilities": {
@@ -342,7 +347,7 @@
       "input_cost": 0.95,
       "output_cost": 4.0,
       "latency": "medium",
-      "context_window": 256000,
+      "context_window": 262144,
       "_source": "https://platform.kimi.ai/docs/pricing/chat-k26",
       "capabilities": {
         "reasoning": 0.85,

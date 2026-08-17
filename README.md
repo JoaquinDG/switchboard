@@ -473,6 +473,12 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
 
+24. **Our catalog understated six context windows by 5x, and item 2 would have inherited it.** Cross-checking against an independent public index (`examples/catalog_crosscheck.py`) found every OpenAI and Google model carrying a conservative `200000` placeholder against a real window of ~1,050,000. Harmless today — the router does not read the field — but ROADMAP item 2 exists to make it a *hard gate*, and shipping that against these numbers would have excluded models that can comfortably do the work. Placeholders are only harmless while nothing depends on them.
+
+25. **Two thirds of the catalog spends thinking tokens by default.** The index reports `reasoning.default_enabled` per model: **10 of 15** matched models, including every Anthropic and OpenAI entry. That is the root cause of the truncation failures found three separate times in this repo, quantified — not an occasional quirk of one model but the normal case. It also means a `max_tokens` default chosen for non-reasoning models is wrong for most of the catalog.
+
+26. **A price index is a drift alarm, not a price source.** The same cross-check found six disagreements, three of them *exactly half* — a pattern that looks like a tier difference rather than a price change — and DeepSeek differing on the very day its dynamic peak/off-peak pricing began, which the catalog's own caveat had predicted the day before. The tool deliberately reports disagreements and refuses to copy the numbers: an index may add margin, quote a different tier, or lag. Only the vendor's page settles it, which is what each entry's `_source` is for. For the same reason it does **not** import the index's benchmark scores as capability scores — GPQA Diamond and τ²-Bench measure graduate science and agentic airline support, four of Switchboard's five task types have no benchmark at all, and `evals/catalog_feedback.py` already measures capability from your own traffic, which is better evidence than any public leaderboard.
+
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
 ## Using real models
@@ -549,7 +555,7 @@ tests/               334 tests (router, gates, triage, auditor, costs, resilienc
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
-                     triage_ab/planner_ab, catalogs
+                     triage_ab/planner_ab, catalog_crosscheck, catalogs
 CITATION.cff         machine-readable citation; drives GitHub's "Cite this repository"
 ```
 
