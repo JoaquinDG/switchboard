@@ -42,6 +42,14 @@ class AuditVerdict:
     passed: bool
     score: float
     issues: list[str] = field(default_factory=list)
+    # Whether this output adds anything beyond an upstream step's output it
+    # was given as input. None when there was no such input to compare
+    # against, or the auditor's response did not address the question.
+    # Deliberately separate from `passed`/`score`: a step can pass its audit
+    # (correct, complete, safe) while still contributing nothing new — a
+    # restatement of its input is not wrong, it is redundant, and that is a
+    # different failure mode from a quality one.
+    adds_value: bool | None = None
     auditor_model: str = ""
     # False when producer and auditor come from the same provider. The audit
     # still happened; it is just weaker evidence, and a pass rate built from
@@ -143,10 +151,30 @@ def _first_json_object(text: str) -> str | None:
     return None
 
 
-def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
+def _parse_adds_value(raw: object) -> bool | None:
+    """Tri-state: True/False, or None (not addressed / not applicable).
+
+    Unlike `pass` and `score`, an unreadable `adds_value` fails open to
+    unknown rather than closed to False. This field only ever *suppresses*
+    downstream spend (see `Broker.run_plan`); a producer that raced ahead of
+    an older audit prompt and never populated it must not have every step it
+    touches treated as worthless by accident.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        low = raw.strip().lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+    return None
+
+
+def _parse_verdict(text: str) -> tuple[bool, float, list[str], bool | None]:
     """Parse a verdict, tolerating fences and prose; unparseable -> fail closed."""
     if not isinstance(text, str) or not text.strip():
-        return False, 0.0, ["auditor returned an empty verdict; failing closed"]
+        return False, 0.0, ["auditor returned an empty verdict; failing closed"], None
 
     candidate = _strip_fences(text)
     data: object = None
@@ -160,7 +188,7 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
             data = None
 
     if not isinstance(data, dict):
-        return False, 0.0, ["auditor returned unparseable verdict; failing closed"]
+        return False, 0.0, ["auditor returned unparseable verdict; failing closed"], None
 
     raw_pass = data.get("pass", False)
     if isinstance(raw_pass, str):  # tolerate "true"/"false"
@@ -170,13 +198,13 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
     try:
         score = float(data.get("score", 0.0))
     except (TypeError, ValueError):
-        return False, 0.0, ["auditor returned a non-numeric score; failing closed"]
+        return False, 0.0, ["auditor returned a non-numeric score; failing closed"], None
     if score != score or score in (float("inf"), float("-inf")):  # NaN / inf
-        return False, 0.0, ["auditor returned a non-finite score; failing closed"]
+        return False, 0.0, ["auditor returned a non-finite score; failing closed"], None
     if not 0.0 <= score <= 1.0:
         # Out of range means the auditor ignored the schema. Clamping and
         # carrying on would launder a broken response into a pass.
-        return False, 0.0, [f"auditor score {score} outside [0, 1]; failing closed"]
+        return False, 0.0, [f"auditor score {score} outside [0, 1]; failing closed"], None
 
     raw_issues = data.get("issues", [])
     if isinstance(raw_issues, str):
@@ -186,7 +214,9 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
     else:
         issues = [f"auditor returned malformed issues field: {raw_issues!r}"]
 
-    return passed, score, issues
+    adds_value = _parse_adds_value(data.get("adds_value"))
+
+    return passed, score, issues, adds_value
 
 
 def audit(
@@ -208,7 +238,7 @@ def audit(
     result = provider.complete(
         auditor_spec.model_id, prompt, max_tokens=policy.max_output_tokens
     )
-    passed, score, issues = _parse_verdict(result.text)
+    passed, score, issues, adds_value = _parse_verdict(result.text)
 
     if output.truncated:
         # The auditor sees a cut-off answer and quite reasonably calls it
@@ -234,6 +264,7 @@ def audit(
         passed=passed,
         score=score,
         issues=issues,
+        adds_value=adds_value,
         auditor_model=auditor_spec.model_id,
         cross_lab=auditor_spec.provider != producer.provider,
         raw=result.text,
