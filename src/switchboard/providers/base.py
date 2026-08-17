@@ -126,7 +126,9 @@ class MockProvider:
     Behavior hooks (all keyed off the prompt text, so tests can steer it):
     - audit prompts (recognised by AUDIT_PROMPT_HEADER, a real line of the
       real audit prompt) return a failing verdict when the audited text
-      contains 'FORCE_AUDIT_FAIL', otherwise a passing one.
+      contains 'FORCE_AUDIT_FAIL', a passing verdict with adds_value=false
+      when it contains 'FORCE_NO_ADDED_VALUE', otherwise a passing verdict
+      with adds_value=true.
     - everything else echoes a canned completion tagged with the model id.
     """
 
@@ -141,9 +143,17 @@ class MockProvider:
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         if self.AUDIT_SENTINEL in prompt:
             if "FORCE_AUDIT_FAIL" in prompt:
-                text = '{"pass": false, "score": 0.35, "issues": ["forced failure for testing"]}'
+                text = (
+                    '{"pass": false, "score": 0.35, '
+                    '"issues": ["forced failure for testing"], "adds_value": null}'
+                )
+            elif "FORCE_NO_ADDED_VALUE" in prompt:
+                text = (
+                    '{"pass": true, "score": 0.9, '
+                    '"issues": ["adds no value over its input"], "adds_value": false}'
+                )
             else:
-                text = '{"pass": true, "score": 0.9, "issues": []}'
+                text = '{"pass": true, "score": 0.9, "issues": [], "adds_value": true}'
         else:
             text = f"[{model_id}] completed: {prompt[:80]}"
         return Completion(

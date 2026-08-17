@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 351 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 351 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -348,6 +348,8 @@ Over-splitting is the expensive error: extra calls, extra audits, extra latency,
 Steps run in dependency order, each dispatched through `Broker.run()` **unchanged**: nothing bypasses triage, the gates, auditing, escalation or failover. A dependent step gets its predecessor's output under a labelled fence, and the routing estimate is re-derived at dispatch because injected context is real input someone pays for. Truncation at `Policy.plan_context_cap_chars` is **named in the trace**, never swallowed.
 
 If a step fails its audit, the steps that **depend** on it are skipped rather than run against rejected input — 58% of a failing run's spend used to land after the failure was already known. Independent steps still run, and `result.skipped_steps` names each skip and why. Set `Policy.plan_halt_dependents_on_failure=False` when a later step's partial answer is useful on its own.
+
+The same halt fires for a step that **passed** its audit but added nothing: the audit prompt asks the auditor for a structured `adds_value` verdict, separate from `pass`/`score`, whenever a step was given a prior step's output as its input. A correct, safe restatement of that input clears the audit and still stops its dependents — a verified answer is not the same question as a useful one, and folding the two into one threshold (the obvious fix) breaks every borderline-but-genuinely-useful answer along with the redundant ones. See learning 23 below.
 
 `result.verified` means every step passed its own audit. That is not the same as the assembled answer being coherent — set `Policy.plan_final_audit=True` for one extra audit of the assembled result against the *original* request, which is the only check that can see whether the pipeline answered the question it was asked.
 
@@ -471,7 +473,7 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 22. **A plan kept building on a step it had already rejected.** When a step failed its audit, every dependent step still ran — consuming the rejected output as ground truth and producing a confidently worded answer built on it. Measured: **58% of a run's spend happened after the failure was already known.** Dependents of a failed step are now skipped by default (`Policy.plan_halt_dependents_on_failure`), with the reason recorded per step and carried through replay. Independent steps still run: only dependents are poisoned. Same information, 58% less money, and the gap in the answer is explicit instead of papered over.
 
-23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
+23. **A verified step can still be worthless downstream, and nothing caught it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fired because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Raising the threshold so 0.72 fails was the tempting fix and the wrong one — it fails every borderline-but-useful answer along with the redundant ones, because "low score" and "adds nothing over its input" are different measurements. **Fix (ROADMAP 1d):** the audit prompt now asks for a third field, `adds_value`, independent of `pass`/`score`, whenever a step's input includes a prior step's output. A step that restates its input can still pass its own audit — `verified` is unchanged, on purpose — but a `False` there now poisons the step for its *dependents* the same way a failed audit does, so `Broker.run_plan` stops paying for a chain of restatements after the first one is caught, without ever suppressing a step that had something to add.
 
 The meta-lesson: scenario evals that encode *product expectations* catch a different class of bug than unit tests, a held-out set catches a different class again, and **running against real APIs catches a fourth class that no amount of mocking can** — dead model ids, credential fallthrough, and the true shape of the cost curve. All the offline layers run in CI, on Python 3.10–3.13; the live layer is opt-in and manual.
 
@@ -545,7 +547,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               351 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,

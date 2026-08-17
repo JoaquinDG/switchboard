@@ -69,6 +69,10 @@ class StepResult:
     injected_chars: int = 0
     injected_truncated: bool = False
     injected_from: tuple[str, ...] = ()
+    # See BrokerResult.adds_value. Copied here so a plan-level reader does not
+    # have to reach into `result.attempts` to see why a step got cut off from
+    # its dependents despite being verified.
+    adds_value: bool | None = None
 
 
 @dataclass
@@ -150,6 +154,9 @@ class Attempt:
     audit_passed: bool | None
     audit_score: float | None
     audit_issues: list[str] = field(default_factory=list)
+    # See AuditVerdict.adds_value. None when unaudited, not applicable (no
+    # upstream input to compare against), or the auditor left it unaddressed.
+    audit_adds_value: bool | None = None
     # Why this model ran: "initial", "escalation" (audit failed), or
     # "failover" (the previous model's provider was unavailable).
     role: str = "initial"
@@ -229,6 +236,17 @@ class BrokerResult:
     def failed_over(self) -> bool:
         """True if a provider outage moved the work to another model."""
         return sum(1 for a in self.attempts if a.role == "failover") > 0
+
+    @property
+    def adds_value(self) -> bool | None:
+        """Whether the final attempt's output added anything over its input.
+
+        None when unaudited, when the step had no upstream input to compare
+        against, or when the auditor did not address the question. Distinct
+        from `verified`: a restatement of a step's own input can pass its
+        audit (correct, safe) while adding nothing new (see `Broker.run_plan`).
+        """
+        return self.attempts[-1].audit_adds_value if self.attempts else None
 
     @property
     def total_cost_usd(self) -> float:
@@ -368,6 +386,7 @@ class Broker:
                     audit_passed=None if verdict is None else verdict.passed,
                     audit_score=None if verdict is None else verdict.score,
                     audit_issues=[] if verdict is None else list(verdict.issues),
+                    audit_adds_value=None if verdict is None else verdict.adds_value,
                     role=role,
                     auditor_model=None if verdict is None else verdict.auditor_model,
                     cross_lab_audit=None if verdict is None else verdict.cross_lab,
@@ -432,22 +451,32 @@ class Broker:
         outputs: dict[str, str] = {}
         results: list[StepResult] = []
         skipped: list[tuple[str, str]] = []
-        poisoned: set[str] = set()
+        # step_id -> why it must not be trusted as input to a later step.
+        # "unverified": failed its own audit. "no_added_value": passed audit
+        # but the auditor judged it a restatement of its own input, adding
+        # nothing (see ROADMAP 1d) — a different failure mode from a quality
+        # one, so it gets a different label rather than being folded into the
+        # same "unverified" bucket the reason text below reports.
+        poisoned: dict[str, str] = {}
         cap = self.policy.plan_context_cap_chars
 
         for step in topological_order(plan):
-            upstream_failed = sorted(poisoned.intersection(step.depends_on))
-            if upstream_failed and self.policy.plan_halt_dependents_on_failure:
-                # Its input is output already judged wrong, and it would
-                # consume that as ground truth. Skipping is not giving up on
-                # the plan — independent steps still run.
-                reason = (f"depends on {', '.join(upstream_failed)}, which did not "
-                          f"verify; its output would be built on rejected input")
+            blocking = sorted(d for d in step.depends_on if d in poisoned)
+            if blocking and self.policy.plan_halt_dependents_on_failure:
+                # Its input is output already judged untrustworthy, and it
+                # would consume that as ground truth. Skipping is not giving
+                # up on the plan — independent steps still run.
+                parts = [
+                    f"{dep} did not verify" if poisoned[dep] == "unverified"
+                    else f"{dep} passed audit but added no value over its own input"
+                    for dep in blocking
+                ]
+                reason = "depends on " + "; ".join(parts)
                 skipped.append((step.step_id, reason))
-                poisoned.add(step.step_id)
+                poisoned[step.step_id] = "unverified"
                 self._trace_event("step_skipped", {
                     "step_id": step.step_id, "reason": reason,
-                    "depends_on_failed": upstream_failed,
+                    "depends_on_failed": blocking,
                 })
                 continue
 
@@ -475,11 +504,16 @@ class Broker:
             result = self.run(task)
             outputs[step.step_id] = result.final_text
             if not result.verified:
-                poisoned.add(step.step_id)
+                poisoned[step.step_id] = "unverified"
+            elif sources and result.adds_value is False:
+                # Only a step that actually received upstream context can be
+                # judged against it. A step with nothing upstream has nothing
+                # to add value "over" — see the trap in ROADMAP 1d.
+                poisoned[step.step_id] = "no_added_value"
             results.append(StepResult(
                 step_id=step.step_id, step=step, result=result,
                 injected_chars=injected, injected_truncated=truncated,
-                injected_from=sources,
+                injected_from=sources, adds_value=result.adds_value,
             ))
             self._trace_event("step_completed", {
                 "step_id": step.step_id,
@@ -487,6 +521,7 @@ class Broker:
                 "verified": result.verified,
                 "escalated": result.escalated,
                 "truncated": result.truncated,
+                "adds_value": result.adds_value,
                 "generation_cost_usd": round(result.generation_cost_usd, 8),
                 "audit_cost_usd": round(result.audit_cost_usd, 8),
                 "total_cost_usd": round(result.total_cost_usd, 8),
