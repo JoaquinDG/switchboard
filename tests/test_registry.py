@@ -62,6 +62,25 @@ class ModelSpecValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.spec(context_window=0)
 
+    def test_token_multiplier_defaults_to_one(self):
+        self.assertEqual(self.spec().token_multiplier, 1.0)
+
+    def test_zero_token_multiplier_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(token_multiplier=0)
+
+    def test_negative_token_multiplier_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(token_multiplier=-1.3)
+
+    def test_boolean_token_multiplier_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(token_multiplier=True)
+
+    def test_non_numeric_token_multiplier_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(token_multiplier="1.3")
+
     def test_empty_model_id_rejected(self):
         with self.assertRaises(ValueError):
             self.spec(model_id="")
@@ -137,6 +156,10 @@ class FromJSONTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.load({"models": [{**VALID, "capabilities": {"coding": 8.0}}]})
         self.assertIn("m1", str(ctx.exception))
+
+    def test_token_multiplier_loads_from_catalog(self):
+        registry = self.load({"models": [{**VALID, "token_multiplier": 1.3}]})
+        self.assertEqual(registry.get("m1").token_multiplier, 1.3)
 
 
 if __name__ == "__main__":
