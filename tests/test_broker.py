@@ -186,6 +186,30 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(escalation_target(Policy("cf", 0.30, 0.60, 0.10)), "frontier-value")
         self.assertEqual(escalation_target(Policy("qf", 0.85, 0.05, 0.10)), "frontier-premium")
 
+    def test_escalation_skips_a_model_that_cannot_hold_the_task(self):
+        # ROADMAP item 2: escalating to a model whose context window is too
+        # small trades an audit failure for a hard provider error. The next
+        # tier up must be skipped in favor of the one after it, the same way
+        # the tier itself is skipped when it has no untried candidates.
+        registry = Registry([
+            ModelSpec("cheap", "labA", "small", 0.1, 0.5, latency="fast",
+                      context_window=200_000,
+                      capabilities={"reasoning": 0.5, "audit": 0.4}),
+            ModelSpec("mid-tiny-context", "labB", "mid", 0.8, 4.0,
+                      context_window=1_000,
+                      capabilities={"reasoning": 0.8, "audit": 0.8}),
+            ModelSpec("frontier-big", "labC", "frontier", 3.0, 15.0,
+                      context_window=200_000,
+                      capabilities={"reasoning": 0.95, "audit": 0.9}),
+        ])
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.3,
+            est_input_tokens=50_000, est_output_tokens=1_000,
+        )
+        broker = Broker(registry, ProviderPool([MockProvider()]), BALANCED)
+        target = broker._escalation_target(registry.get("cheap"), task, tried=set())
+        self.assertEqual(target.model_id, "frontier-big")
+
     def test_attempt_roles_are_recorded(self):
         task = Task(prompt="FORCE_AUDIT_FAIL easy", task_type="extraction", complexity=0.2)
         result = make_broker().run(task)
