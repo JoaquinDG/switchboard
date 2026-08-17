@@ -54,6 +54,15 @@ class ModelSpec:
     output_cost: float  # USD per 1M output tokens
     latency: str = "medium"  # one of LATENCY_CLASSES
     context_window: int = 200_000
+    # Multiplier applied to a task's *estimated* token counts before pricing,
+    # for models whose tokenizer produces more tokens per unit of text than a
+    # typical one (documented per-model in the catalog, e.g. Claude 4.7+).
+    # Comparing vendors on per-token price alone understates these models'
+    # real cost. Default 1.0 (no adjustment) for every model nobody has
+    # flagged. This is an estimate correction only — actual_cost prices
+    # tokens a provider already reported, which already reflect whichever
+    # tokenizer ran, so applying this there would double-count it.
+    token_multiplier: float = 1.0
     # 0-1 capability score per task type, e.g. {"reasoning": 0.9, "extraction": 0.7}
     capabilities: dict[str, float] = field(default_factory=dict)
 
@@ -77,6 +86,15 @@ class ModelSpec:
             raise ValueError(
                 f"{self.model_id}: context_window must be a positive int, "
                 f"got {self.context_window!r}"
+            )
+        if (
+            isinstance(self.token_multiplier, bool)
+            or not isinstance(self.token_multiplier, (int, float))
+            or self.token_multiplier <= 0
+        ):
+            raise ValueError(
+                f"{self.model_id}: token_multiplier must be a positive number, "
+                f"got {self.token_multiplier!r}"
             )
         # Capability scores are the input the router trusts most; garbage here
         # produces confidently wrong routing, so validate at construction.
