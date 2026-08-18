@@ -173,10 +173,12 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** a policy threshold below which triage escalates from heuristic to model; a measurement of resulting accuracy and cost per classification; the rationale still naming which layer decided each time.
 - **Trap:** the honesty rule holds. A prompt classified by the heuristic must still say `heuristic`, even when the policy *would have* escalated but the model call failed.
 
-### 6. Budget-aware policy
-- [ ] **Why it matters:** Policies are static, but budgets are not. A team three weeks into a monthly cap wants different weights from one on day one, and today that means editing code mid-month.
+### 6. Budget-aware policy — **DONE**
+- [x] **Why it matters:** Policies are static, but budgets are not. A team three weeks into a monthly cap wants different weights from one on day one, and today that means editing code mid-month.
 - **Done looks like:** a policy that reads cumulative spend from traces and shifts cost weight as the cap approaches, with the current budget position visible in the rationale.
 - **Trap:** it must degrade gracefully to a normal policy when no trace history exists. A cold start must not behave like an exhausted budget.
+- **Shipped as:** `Policy.budget_usd` (`None` by default — off), `budget_period_days` (rolling window, default 30) and `budget_max_cost_shift` (cap on how much weight can move, default 0.3), plus a new `budget.py` module with `budget_position()` (reads the Broker's own trace file, sums `total_cost_usd` inside the window) and `apply_budget_pressure()` (moves weight out of `quality_weight`/`latency_weight` into `cost_weight`, proportional to spend/cap, capped at `budget_max_cost_shift`). `Broker.run()` computes the position from its own `trace_path` before every call, scores and escalates under the adjusted policy, and restores the caller's original `Policy` object afterward so it is never left mutated. The budget position is appended to the routing rationale (`budget: $X/$Y spent over Nd (P% of cap, n=samples)`), or `"cold start"` when the trace has no history in the window — the trap case — rather than silently reading as an exhausted budget.
+- **Not done:** the shift is linear in spend/cap and taken proportionally from the other two weights; no attempt was made to model a smarter spend curve (e.g. front-loading caution early in the period). That is a tuning question for real spend data, not a correctness gap.
 
 ### 7. Multi-auditor consensus for high-stakes tasks
 - [ ] **Why it matters:** One auditor is one opinion. For high-complexity or explicitly flagged work, N independent auditors and a majority verdict is meaningfully stronger evidence — and the cross-lab machinery to pick genuinely independent auditors already exists.

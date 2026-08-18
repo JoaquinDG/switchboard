@@ -7,6 +7,7 @@ when a provider falls over, and account for every dollar it took.
 
 from .auditor import AUDIT_PROMPT_TEMPLATE, AuditVerdict, audit, pick_auditor
 from .broker import Attempt, Broker, BrokerResult, PlanResult, StepResult
+from .budget import BudgetPosition, apply_budget_pressure, budget_position
 from .policies import (
     BALANCED,
     COST_FIRST,
@@ -91,6 +92,7 @@ __all__ = [
     "BALANCED",
     "Broker",
     "BrokerResult",
+    "BudgetPosition",
     "CATALOG_STALE_AFTER_DAYS",
     "COST_FIRST",
     "CatalogStaleWarning",
@@ -131,7 +133,9 @@ __all__ = [
     "Triage",
     "UNKNOWN_CAPABILITY_PRIOR",
     "actual_cost",
+    "apply_budget_pressure",
     "audit",
+    "budget_position",
     "build_provider",
     "build_retry_prompt",
     "classify_heuristic",

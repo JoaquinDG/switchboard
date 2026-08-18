@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .auditor import AuditVerdict, audit
+from .budget import apply_budget_pressure, budget_position
 from .policies import Policy, Task
 from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
@@ -297,111 +298,134 @@ class Broker:
                 use_model=self.triage_use_model,
             )
 
-        decision = route(task, self.registry, self.policy)
-        if triage_verdict is not None:
-            # Prepend rather than append: how the task was classified is the
-            # first thing that has to be true for the rest of the rationale to
-            # mean anything, and it names the layer that decided.
-            decision = replace(
-                decision, rationale=f"{triage_verdict.describe()}; {decision.rationale}"
-            )
-        spec = decision.chosen
-        attempts: list[Attempt] = []
-        escalations_used = 0
-        failovers_used = 0
-        tried: set[str] = set()
-        role = "initial"
-        first_success: Completion | None = None
-        # Findings from the last failed audit, handed to the next attempt.
-        # Survives failover as well as escalation: the findings describe what
-        # is wrong with the work, not why we changed models.
-        feedback: list[str] = []
+        # Budget-aware weighting (ROADMAP 6): if the policy has a cap, read
+        # this Broker's own trace for cumulative spend in the window and
+        # score under the pressure-adjusted policy instead. Swapped back in
+        # the `finally` below so the caller's Policy object is never left
+        # mutated after run() returns — only this call sees the shift.
+        original_policy = self.policy
+        position = None
+        if self.policy.budget_usd is not None:
+            position = budget_position(self.policy, self.trace_path)
+            self.policy = apply_budget_pressure(self.policy, position)
+        try:
+            decision = route(task, self.registry, self.policy)
+            if triage_verdict is not None:
+                # Prepend rather than append: how the task was classified is
+                # the first thing that has to be true for the rest of the
+                # rationale to mean anything, and it names the layer that
+                # decided.
+                decision = replace(
+                    decision, rationale=f"{triage_verdict.describe()}; {decision.rationale}"
+                )
+            if position is not None:
+                # Appended, not prepended: budget position is context for the
+                # weights above, not a precondition for them the way triage's
+                # classification is.
+                decision = replace(
+                    decision, rationale=f"{decision.rationale}; {position.describe()}"
+                )
+            spec = decision.chosen
+            attempts: list[Attempt] = []
+            escalations_used = 0
+            failovers_used = 0
+            tried: set[str] = set()
+            role = "initial"
+            first_success: Completion | None = None
+            # Findings from the last failed audit, handed to the next
+            # attempt. Survives failover as well as escalation: the findings
+            # describe what is wrong with the work, not why we changed
+            # models.
+            feedback: list[str] = []
 
-        while True:
-            tried.add(spec.model_id)
-            try:
-                output = self._complete(spec, task, feedback)
-            except ProviderError as e:
+            while True:
+                tried.add(spec.model_id)
+                try:
+                    output = self._complete(spec, task, feedback)
+                except ProviderError as e:
+                    attempts.append(
+                        Attempt(
+                            model_id=spec.model_id,
+                            tier=spec.tier,
+                            output_text="",
+                            audit_passed=None,
+                            audit_score=None,
+                            role=role,
+                            had_audit_feedback=bool(feedback),
+                            error=str(e),
+                            synthetic=self._provider_synthetic(spec.provider),
+                        )
+                    )
+                    # A missing key or bad credentials is a deployment bug.
+                    # Routing around it would quietly move traffic to a
+                    # pricier provider and hide the misconfiguration until
+                    # the invoice arrives.
+                    fallback = (
+                        None
+                        if isinstance(e, ProviderConfigError)
+                        else self._failover_target(decision, tried)
+                    )
+                    if fallback is None or failovers_used >= self.policy.max_provider_failovers:
+                        result = self._finalize(task, decision, attempts, "", spec, first_success, triage_verdict)
+                        self._trace(task, decision, result)
+                        raise ProviderError(
+                            f"all routing options exhausted after {len(attempts)} provider "
+                            f"failure(s); last error: {e}",
+                            provider=spec.provider,
+                            model_id=spec.model_id,
+                        ) from e
+                    failovers_used += 1
+                    spec, role = fallback, "failover"
+                    continue
+
+                if first_success is None:
+                    first_success = output
+
+                verdict = self._maybe_audit(task, output, spec)
                 attempts.append(
                     Attempt(
                         model_id=spec.model_id,
                         tier=spec.tier,
-                        output_text="",
-                        audit_passed=None,
-                        audit_score=None,
+                        output_text=output.text,
+                        audit_passed=None if verdict is None else verdict.passed,
+                        audit_score=None if verdict is None else verdict.score,
+                        audit_issues=[] if verdict is None else list(verdict.issues),
                         role=role,
+                        auditor_model=None if verdict is None else verdict.auditor_model,
+                        cross_lab_audit=None if verdict is None else verdict.cross_lab,
                         had_audit_feedback=bool(feedback),
-                        error=str(e),
-                        synthetic=self._provider_synthetic(spec.provider),
+                        stop_reason=output.stop_reason,
+                        truncated=output.truncated,
+                        input_tokens=output.input_tokens,
+                        output_tokens=output.output_tokens,
+                        cost_usd=actual_cost(spec, output.input_tokens, output.output_tokens),
+                        audit_cost_usd=0.0 if verdict is None else verdict.cost_usd,
+                        synthetic=self._provider_synthetic(spec.provider)
+                        or bool(verdict is not None and verdict.synthetic),
                     )
                 )
-                # A missing key or bad credentials is a deployment bug. Routing
-                # around it would quietly move traffic to a pricier provider
-                # and hide the misconfiguration until the invoice arrives.
-                fallback = (
-                    None
-                    if isinstance(e, ProviderConfigError)
-                    else self._failover_target(decision, tried)
+
+                passed = verdict is None or verdict.passed
+                next_spec = self._escalation_target(spec, task, tried)
+                can_escalate = (
+                    not passed
+                    and next_spec is not None
+                    and escalations_used < self.policy.max_escalations
                 )
-                if fallback is None or failovers_used >= self.policy.max_provider_failovers:
-                    result = self._finalize(task, decision, attempts, "", spec, first_success, triage_verdict)
+                if not can_escalate:
+                    result = self._finalize(
+                        task, decision, attempts, output.text, spec, first_success, triage_verdict
+                    )
                     self._trace(task, decision, result)
-                    raise ProviderError(
-                        f"all routing options exhausted after {len(attempts)} provider "
-                        f"failure(s); last error: {e}",
-                        provider=spec.provider,
-                        model_id=spec.model_id,
-                    ) from e
-                failovers_used += 1
-                spec, role = fallback, "failover"
-                continue
+                    return result
 
-            if first_success is None:
-                first_success = output
-
-            verdict = self._maybe_audit(task, output, spec)
-            attempts.append(
-                Attempt(
-                    model_id=spec.model_id,
-                    tier=spec.tier,
-                    output_text=output.text,
-                    audit_passed=None if verdict is None else verdict.passed,
-                    audit_score=None if verdict is None else verdict.score,
-                    audit_issues=[] if verdict is None else list(verdict.issues),
-                    role=role,
-                    auditor_model=None if verdict is None else verdict.auditor_model,
-                    cross_lab_audit=None if verdict is None else verdict.cross_lab,
-                    had_audit_feedback=bool(feedback),
-                    stop_reason=output.stop_reason,
-                    truncated=output.truncated,
-                    input_tokens=output.input_tokens,
-                    output_tokens=output.output_tokens,
-                    cost_usd=actual_cost(spec, output.input_tokens, output.output_tokens),
-                    audit_cost_usd=0.0 if verdict is None else verdict.cost_usd,
-                    synthetic=self._provider_synthetic(spec.provider)
-                    or bool(verdict is not None and verdict.synthetic),
-                )
-            )
-
-            passed = verdict is None or verdict.passed
-            next_spec = self._escalation_target(spec, task, tried)
-            can_escalate = (
-                not passed
-                and next_spec is not None
-                and escalations_used < self.policy.max_escalations
-            )
-            if not can_escalate:
-                result = self._finalize(
-                    task, decision, attempts, output.text, spec, first_success, triage_verdict
-                )
-                self._trace(task, decision, result)
-                return result
-
-            # Escalation is a repair, not a blind re-roll: hand the stronger
-            # model what the auditor actually objected to.
-            feedback = list(verdict.issues) if verdict else []
-            escalations_used += 1
-            spec, role = next_spec, "escalation"
+                # Escalation is a repair, not a blind re-roll: hand the
+                # stronger model what the auditor actually objected to.
+                feedback = list(verdict.issues) if verdict else []
+                escalations_used += 1
+                spec, role = next_spec, "escalation"
+        finally:
+            self.policy = original_policy
 
     def run_plan(self, request: str | Plan) -> PlanResult:
         """Decompose a compound request, run each step, and report the bill.
