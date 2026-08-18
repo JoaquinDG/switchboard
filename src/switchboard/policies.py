@@ -35,6 +35,10 @@ class Task:
     est_input_tokens: int = 1_000
     est_output_tokens: int = 500
     needs_fast_response: bool = False
+    # Explicitly flags work as warranting a multi-auditor panel rather than a
+    # single verdict, regardless of complexity. Only takes effect when
+    # Policy.multi_auditor_count > 1; see that field's docstring.
+    high_stakes: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.complexity <= 1.0:
@@ -124,6 +128,19 @@ class Policy:
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
     max_provider_failovers: int = 2
+    # How many independent auditors grade high-stakes work. 1 (default) is
+    # today's behaviour: one auditor, one opinion. A panel of N auditors,
+    # aggregated by strict majority, is meaningfully stronger evidence for
+    # work where a single grader's blind spot is an unacceptable risk — and
+    # the cross-lab selection machinery that already keeps one auditor
+    # independent of the producer is reused to spread the panel across labs.
+    multi_auditor_count: int = 1
+    # Tasks at or above this complexity get the multi-auditor panel instead
+    # of one auditor, on top of `Task.high_stakes`. None (default) means
+    # complexity alone never triggers a panel — only an explicit
+    # `high_stakes=True` task does. Only consulted when multi_auditor_count
+    # > 1; a policy that never asks for a panel need not set this.
+    multi_auditor_complexity_gate: float | None = None
 
     def __post_init__(self) -> None:
         total = self.quality_weight + self.cost_weight + self.latency_weight
@@ -162,6 +179,22 @@ class Policy:
         ):
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be a non-negative int, got {value!r}")
+        if (
+            not isinstance(self.multi_auditor_count, int)
+            or isinstance(self.multi_auditor_count, bool)
+            or self.multi_auditor_count < 1
+        ):
+            raise ValueError(
+                f"multi_auditor_count must be a positive int, "
+                f"got {self.multi_auditor_count!r}"
+            )
+        if self.multi_auditor_complexity_gate is not None and not (
+            0.0 <= self.multi_auditor_complexity_gate <= 1.0
+        ):
+            raise ValueError(
+                f"multi_auditor_complexity_gate must be in [0, 1] or None, "
+                f"got {self.multi_auditor_complexity_gate!r}"
+            )
         if self.on_no_qualified_model not in NO_QUALIFIED_MODEL_STRATEGIES:
             raise ValueError(
                 f"on_no_qualified_model must be one of {NO_QUALIFIED_MODEL_STRATEGIES}, "

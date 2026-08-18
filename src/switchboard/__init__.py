@@ -5,7 +5,15 @@ verify outputs with cross-model audits, escalate when quality fails, reroute
 when a provider falls over, and account for every dollar it took.
 """
 
-from .auditor import AUDIT_PROMPT_TEMPLATE, AuditVerdict, audit, pick_auditor
+from .auditor import (
+    AUDIT_PROMPT_TEMPLATE,
+    AuditVerdict,
+    ConsensusVerdict,
+    audit,
+    audit_consensus,
+    pick_auditor,
+    pick_auditors,
+)
 from .broker import Attempt, Broker, BrokerResult, PlanResult, StepResult
 from .policies import (
     BALANCED,
@@ -95,6 +103,7 @@ __all__ = [
     "COST_FIRST",
     "CatalogStaleWarning",
     "Completion",
+    "ConsensusVerdict",
     "ESCALATION_RETRY_TEMPLATE",
     "FlakyProvider",
     "ModelSpec",
@@ -132,6 +141,7 @@ __all__ = [
     "UNKNOWN_CAPABILITY_PRIOR",
     "actual_cost",
     "audit",
+    "audit_consensus",
     "build_provider",
     "build_retry_prompt",
     "classify_heuristic",
@@ -149,6 +159,7 @@ __all__ = [
     "plan_request",
     "plan_with_model",
     "pick_auditor",
+    "pick_auditors",
     "route",
     "task_records",
     "topological_order",

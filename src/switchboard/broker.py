@@ -27,7 +27,7 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from .auditor import AuditVerdict, audit
+from .auditor import AuditVerdict, ConsensusVerdict, audit, audit_consensus
 from .policies import Policy, Task
 from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
@@ -175,6 +175,17 @@ class Attempt:
     # skip these when measuring capability from traces — a MockProvider audit
     # is not evidence about the model it "graded".
     synthetic: bool = False
+    # Set only when Policy.multi_auditor_count > 1 fired a consensus panel
+    # for this attempt (see Policy.multi_auditor_count): one dict per
+    # auditor (auditor_model, passed, score, cross_lab, issues), so a 2-1
+    # split survives in the trace instead of collapsing into audit_passed's
+    # single majority verdict. None for a normal single-auditor audit or an
+    # unaudited attempt.
+    consensus_verdicts: list[dict] | None = None
+    # Whether every auditor on the panel agreed. None when no panel ran.
+    # False is the signal a reviewer of high-stakes work needs to see;
+    # audit_passed alone (the majority) hides it.
+    audit_unanimous: bool | None = None
 
     @property
     def total_cost_usd(self) -> float:
@@ -360,6 +371,20 @@ class Broker:
                 first_success = output
 
             verdict = self._maybe_audit(task, output, spec)
+            consensus_detail = None
+            if isinstance(verdict, ConsensusVerdict):
+                # Full per-auditor detail, kept even though audit_passed below
+                # only carries the majority — see Attempt.consensus_verdicts.
+                consensus_detail = [
+                    {
+                        "auditor_model": v.auditor_model,
+                        "passed": v.passed,
+                        "score": v.score,
+                        "cross_lab": v.cross_lab,
+                        "issues": list(v.issues),
+                    }
+                    for v in verdict.verdicts
+                ]
             attempts.append(
                 Attempt(
                     model_id=spec.model_id,
@@ -380,6 +405,10 @@ class Broker:
                     audit_cost_usd=0.0 if verdict is None else verdict.cost_usd,
                     synthetic=self._provider_synthetic(spec.provider)
                     or bool(verdict is not None and verdict.synthetic),
+                    consensus_verdicts=consensus_detail,
+                    audit_unanimous=(
+                        verdict.unanimous if isinstance(verdict, ConsensusVerdict) else None
+                    ),
                 )
             )
 
@@ -670,10 +699,15 @@ class Broker:
 
     def _maybe_audit(
         self, task: Task, output: Completion, spec: ModelSpec
-    ) -> AuditVerdict | None:
+    ) -> AuditVerdict | ConsensusVerdict | None:
         if not self.policy.audit_enabled or len(self.registry) < 2:
             return None
         try:
+            if self._wants_consensus(task):
+                return audit_consensus(
+                    task, output, spec, self.registry, self.providers, self.policy,
+                    self.policy.multi_auditor_count,
+                )
             return audit(task, output, spec, self.registry, self.providers, self.policy)
         except ProviderError as e:
             # An audit we could not run is an audit that did not pass. Treating
@@ -684,6 +718,20 @@ class Broker:
                 score=0.0,
                 issues=[f"auditor unavailable ({e}); failing closed"],
             )
+
+    def _wants_consensus(self, task: Task) -> bool:
+        """Whether this task gets a multi-auditor panel instead of one auditor.
+
+        A policy question (how many auditors, at what complexity) crossed
+        with a task question (is this specific request flagged high-stakes),
+        the same split `Task` vs `Policy` draws everywhere else.
+        """
+        if self.policy.multi_auditor_count <= 1:
+            return False
+        if task.high_stakes:
+            return True
+        gate = self.policy.multi_auditor_complexity_gate
+        return gate is not None and task.complexity >= gate
 
     def _failover_target(
         self, decision: RoutingDecision, tried: set[str]
@@ -787,6 +835,12 @@ class Broker:
             # results were signed off by a model from the same lab?"
             "final_audit_cross_lab": (
                 result.attempts[-1].cross_lab_audit if result.attempts else None
+            ),
+            # Top-level so a trace query can find every task where a
+            # multi-auditor panel disagreed, without walking into "attempts".
+            # None when no panel ran; False is the disagreement itself.
+            "final_audit_unanimous": (
+                result.attempts[-1].audit_unanimous if result.attempts else None
             ),
             "gates": list(decision.gates),
             "warnings": list(result.warnings),
