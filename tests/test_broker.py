@@ -514,3 +514,92 @@ class OutputCeilingTests(unittest.TestCase):
     def test_a_zero_ceiling_is_refused(self):
         with self.assertRaises(ValueError):
             Policy("bad", 0.5, 0.3, 0.2, max_output_tokens=0)
+
+
+class BudgetAwareTests(unittest.TestCase):
+    """ROADMAP item 6: routing weight shifts toward cost as spend nears a cap."""
+
+    def test_cold_start_reports_zero_pressure_not_an_exhausted_budget(self):
+        # The item's own trap: no trace history yet must not read as "the
+        # budget is gone".
+        policy = Policy("p", 0.5, 0.3, 0.2, budget_usd=1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace)
+            broker.run(Task(prompt="x", task_type="summarization"))
+            record = json.loads(trace.read_text().strip().splitlines()[0])
+            self.assertIn("cold start", record["rationale"])
+
+    def test_broker_policy_is_restored_after_run_returns(self):
+        policy = Policy("p", 0.5, 0.3, 0.2, budget_usd=0.0000001, budget_max_cost_shift=0.3)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace)
+            broker.run(Task(prompt="x", task_type="summarization"))
+            self.assertIs(broker.policy, policy)
+            self.assertEqual(broker.policy.cost_weight, 0.3)
+
+    def test_pressure_builds_across_runs_sharing_a_trace_file(self):
+        policy = Policy("p", 0.5, 0.3, 0.2, budget_usd=0.000001, budget_max_cost_shift=0.3)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace)
+            broker.run(Task(prompt="x", task_type="summarization"))
+            broker.run(Task(prompt="y", task_type="summarization"))
+            lines = trace.read_text().strip().splitlines()
+            first_rationale = json.loads(lines[0])["rationale"]
+            second_rationale = json.loads(lines[1])["rationale"]
+            self.assertIn("cold start", first_rationale)
+            self.assertIn("budget:", second_rationale)
+            self.assertNotIn("cold start", second_rationale)
+
+    def test_no_budget_cap_means_no_budget_text_in_the_rationale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), BALANCED, trace)
+            broker.run(Task(prompt="x", task_type="summarization"))
+            record = json.loads(trace.read_text().strip())
+            self.assertNotIn("budget:", record["rationale"])
+
+    def test_a_tiny_budget_drives_pressure_to_one_and_the_weights_shift_accordingly(self):
+        from switchboard.budget import apply_budget_pressure, budget_position
+
+        policy = Policy("p", 0.5, 0.3, 0.2, budget_usd=0.0000001, budget_max_cost_shift=0.3)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace)
+            broker.run(Task(prompt="x", task_type="summarization"))
+            pos = budget_position(policy, trace)
+            self.assertAlmostEqual(pos.pressure, 1.0)
+            adjusted = apply_budget_pressure(policy, pos)
+            self.assertAlmostEqual(adjusted.cost_weight, 0.6)
+
+    def test_escalation_scoring_uses_the_same_budget_adjusted_weights_as_routing(self):
+        # The same bug class fixed for policy honesty elsewhere (ROADMAP 1b,
+        # 2): escalation must score under the identical weights routing used,
+        # not the caller's unshifted policy.
+        import switchboard.broker as broker_module
+        from switchboard.router import score_models as real_score_models
+
+        policy = Policy("p", 0.5, 0.3, 0.2, budget_usd=0.0000001, budget_max_cost_shift=0.3)
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(demo_registry(), ProviderPool([MockProvider()]), policy, trace)
+            broker.run(Task(prompt="seed", task_type="summarization"))  # seeds spend
+
+            seen_policies = []
+
+            def spy(task, candidates, registry, policy_arg):
+                seen_policies.append(policy_arg.cost_weight)
+                return real_score_models(task, candidates, registry, policy_arg)
+
+            broker_module.score_models = spy
+            try:
+                result = broker.run(Task(
+                    prompt="FORCE_AUDIT_FAIL easy", task_type="extraction", complexity=0.2,
+                ))
+            finally:
+                broker_module.score_models = real_score_models
+            self.assertEqual(len(result.attempts), 2)  # confirms escalation actually fired
+            self.assertTrue(seen_policies)
+            self.assertTrue(all(abs(w - 0.6) < 1e-9 for w in seen_policies), seen_policies)

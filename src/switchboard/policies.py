@@ -124,6 +124,22 @@ class Policy:
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
     max_provider_failovers: int = 2
+    # Budget-aware weighting (ROADMAP item 6). None (default) means spend
+    # never affects the weights above — a normal, static policy. Set it and
+    # the Broker reads its own trace file before each run() and shifts weight
+    # from quality/latency toward cost as cumulative spend in the trailing
+    # `budget_period_days` window approaches this cap. The policy object
+    # itself never changes; the shift produces a separate effective policy
+    # for that call, named in the rationale (see budget.py).
+    budget_usd: float | None = None
+    # Rolling window, in days, that spend is measured over. Only meaningful
+    # when budget_usd is set. Default 30 mirrors a monthly cap.
+    budget_period_days: int = 30
+    # Ceiling on how much weight budget pressure can move into cost_weight,
+    # reached only once spend meets or exceeds budget_usd. Taken
+    # proportionally from quality_weight and latency_weight, so their
+    # relative mix to each other is preserved as cost eats into both.
+    budget_max_cost_shift: float = 0.3
 
     def __post_init__(self) -> None:
         total = self.quality_weight + self.cost_weight + self.latency_weight
@@ -138,9 +154,23 @@ class Policy:
             ("audit_pass_threshold", self.audit_pass_threshold),
             ("min_auditor_capability", self.min_auditor_capability),
             ("plan_confidence_threshold", self.plan_confidence_threshold),
+            ("budget_max_cost_shift", self.budget_max_cost_shift),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{label} must be in [0, 1], got {value}")
+        if self.budget_usd is not None:
+            if isinstance(self.budget_usd, bool) or not isinstance(self.budget_usd, (int, float)):
+                raise ValueError(f"budget_usd must be a number, got {self.budget_usd!r}")
+            if self.budget_usd <= 0:
+                raise ValueError(f"budget_usd must be positive, got {self.budget_usd!r}")
+        if isinstance(self.budget_period_days, bool) or not isinstance(self.budget_period_days, int):
+            raise ValueError(
+                f"budget_period_days must be an int, got {self.budget_period_days!r}"
+            )
+        if self.budget_period_days <= 0:
+            raise ValueError(
+                f"budget_period_days must be positive, got {self.budget_period_days!r}"
+            )
         if self.auditor_selection not in AUDITOR_SELECTION_STRATEGIES:
             raise ValueError(
                 f"auditor_selection must be one of {AUDITOR_SELECTION_STRATEGIES}, "

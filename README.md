@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 365 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 365 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -427,6 +427,8 @@ Every held-out failure collapsed to `reasoning`, the conservative default — th
 
 **Escalate once by default.** Unbounded retry loops burn money chasing tasks that need a human. `max_escalations` is a policy knob; the default is deliberately conservative.
 
+**Budgets shift weight; they do not become a gate.** `Policy.budget_usd` is `None` by default — off. Set it and `Broker.run()` reads its own trace file before every call, sums `total_cost_usd` over the trailing `budget_period_days` window, and moves weight out of `quality_weight`/`latency_weight` into `cost_weight` in proportion to how close spend is to the cap (`budget_max_cost_shift` bounds the move; escalation scores under the same adjusted weights, so it can't quietly ignore the pressure routing just honoured). A cap is a product decision about *how much the tradeoff should lean toward cost as spend rises*, not a hard stop — a task that genuinely needs the frontier model still gets it, just under more cost pressure than day one. The budget position (`$spent/$cap over Nd, P% of cap`) is appended to the rationale so the shift is visible, and a trace with nothing in the window reports `pressure=0%, cold start` rather than reading as an exhausted budget — a fresh deployment and a blown cap must not look the same.
+
 **Availability is not quality.** A provider outage reroutes to the next-ranked model on its own `max_provider_failovers` budget, without consuming escalation budget. Conflating the two means one 503 silently disables quality escalation for that task. A missing API key is the exception: that's a deployment bug, and rerouting around it would quietly move traffic to a pricier provider and hide the misconfiguration until the invoice arrives.
 
 **Audits cost real money, and now it is measured.** Unaudited outputs are never marked `verified`. In the live run above, verification was **74% of total spend** with the default frontier auditor, peaking at **188x the generation cost** on one small task — the audit prompt carries the original prompt plus the output plus the rubric, so it has a floor a small task cannot amortise. That is fine on a 4,000-token document and absurd on a 40-token one. `Policy.auditor_selection="cheapest_qualified"` buys the cheapest model clearing `min_auditor_capability` instead. The default stays `most_capable`, because a weak auditor is a fake one.
@@ -533,7 +535,7 @@ Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)*
 - **Batch-API pricing** — a ~50% discount the router cannot currently see.
 - **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
 
-Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
+Then: multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
 
 ## Repo map
 
@@ -551,7 +553,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               365 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
