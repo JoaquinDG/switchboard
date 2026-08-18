@@ -59,7 +59,8 @@
     "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing Switchboard does not model.",
     "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real.",
     "A vendor listing a model in /models does not mean the chat endpoint accepts it. Verify with live_check.py --probe, which makes one 1-token call per model.",
-    "An independent index (OpenRouter) disagrees with six of these prices as of 2026-08-16 -- three by exactly half, which looks like a tier difference rather than a price change, and DeepSeek by more, on the day its dynamic peak/off-peak pricing began. Run examples/catalog_crosscheck.py to see the current disagreements. Only the vendor's own page settles them."
+    "An independent index (OpenRouter) disagrees with six of these prices as of 2026-08-16 -- three by exactly half, which looks like a tier difference rather than a price change, and DeepSeek by more, on the day its dynamic peak/off-peak pricing began. Run examples/catalog_crosscheck.py to see the current disagreements. Only the vendor's own page settles them.",
+    "batch_discount is populated only for the four Anthropic models, verified against platform.claude.com/docs/en/about-claude/pricing on 2026-08-18: the Batch API is a flat 50% off both input and output tokens for every model on that page. OpenAI, Google, DeepSeek and Moonshot each publish a batch/async pricing tier too, but their docs pages were unreachable from this environment on 2026-08-18 (network egress blocked), so those four providers are left at the field's default of 0.0 -- 'not modeled', not 'no discount exists'. Fill them in once verified against the vendor's own page rather than assuming parity with Anthropic's rate."
   ],
   "models": [
     {
@@ -70,7 +71,9 @@
       "output_cost": 25.0,
       "latency": "slow",
       "context_window": 1000000,
+      "batch_discount": 0.5,
       "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "_batch_source": "https://platform.claude.com/docs/en/about-claude/pricing#batch-processing, verified 2026-08-18: batch input $2.50/MTok, batch output $12.50/MTok, both exactly 50% of standard.",
       "capabilities": {
         "reasoning": 0.95,
         "coding": 0.95,
@@ -88,7 +91,9 @@
       "output_cost": 50.0,
       "latency": "slow",
       "context_window": 1000000,
+      "batch_discount": 0.5,
       "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "_batch_source": "https://platform.claude.com/docs/en/about-claude/pricing#batch-processing, verified 2026-08-18: batch input $5/MTok, batch output $25/MTok, both exactly 50% of standard.",
       "_note": "Priciest entry in the catalog; included so cost normalization has a real ceiling.",
       "capabilities": {
         "reasoning": 0.94,
@@ -107,7 +112,9 @@
       "output_cost": 10.0,
       "latency": "medium",
       "context_window": 1000000,
+      "batch_discount": 0.5,
       "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "_batch_source": "https://platform.claude.com/docs/en/about-claude/pricing#batch-processing, verified 2026-08-18: batch input $1/MTok, batch output $5/MTok, both exactly 50% of standard.",
       "capabilities": {
         "reasoning": 0.87,
         "coding": 0.89,
@@ -125,7 +132,9 @@
       "output_cost": 5.0,
       "latency": "fast",
       "context_window": 200000,
+      "batch_discount": 0.5,
       "_source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "_batch_source": "https://platform.claude.com/docs/en/about-claude/pricing#batch-processing, verified 2026-08-18: batch input $0.50/MTok, batch output $2.50/MTok, both exactly 50% of standard.",
       "capabilities": {
         "reasoning": 0.7,
         "coding": 0.72,

@@ -158,10 +158,12 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** an optional per-model `token_multiplier` (default 1.0) applied in `estimate_cost`, populated for the models the catalog flags, documented as an estimate. Actual billing still uses observed tokens and must not be double-counted.
 - **Trap:** `actual_cost` operates on token counts the provider already reported. Applying the multiplier there would inflate real bills. It belongs in the *estimate* path only.
 
-### 4. Batch-API pricing
-- [ ] **Why it matters:** Vendors offer ~50% off for asynchronous batch processing — the single largest discount available, and the router cannot see it. A brokerage that ignores the biggest cost lever in the market is incomplete.
+### 4. Batch-API pricing — **DONE**
+- [x] **Why it matters:** Vendors offer ~50% off for asynchronous batch processing — the single largest discount available, and the router cannot see it. A brokerage that ignores the biggest cost lever in the market is incomplete.
 - **Done looks like:** a `Task` flag for latency-insensitive work, a catalog field for the batch discount, and routing that prices eligible tasks at the batch rate. `needs_fast_response` and batch eligibility are mutually exclusive; enforce that.
 - **Trap:** do not claim batch *execution* support. This is pricing-model work. Actually submitting to batch endpoints is a separate, larger item — say so rather than implying it works.
+- **Shipped as:** `Task.batch_eligible` (`policies.py`, raises in `__post_init__` if set alongside `needs_fast_response`), `ModelSpec.batch_discount` (`registry.py`, validated to `[0, 1)`, default `0.0` meaning "not modeled" rather than "no discount"), and `router.estimate_cost` scaling both token estimates by `1 - batch_discount` when `task.batch_eligible`. `router.actual_cost` is untouched — it prices tokens a provider actually billed for a call that actually happened at the standard synchronous rate, and Switchboard never submits to a real batch endpoint, so applying the discount there would claim a saving nobody received. The chosen model's rationale line names the batch rate when one applies, and warns when a batch-eligible task lands on a model with no `batch_discount` in the catalog.
+- **Populated in `examples/starter_catalog.json`:** only the four Anthropic models, at `0.5`, sourced from `platform.claude.com/docs/en/about-claude/pricing#batch-processing` and fetched live during this session (2026-08-18) — the page states batch input/output are exactly half of standard for every model listed. OpenAI's, Google's, DeepSeek's, and Moonshot's pricing pages were unreachable from this environment (network egress blocked to those hosts), so those providers stay at the field's `0.0` default rather than guessing parity with Anthropic's rate. Noted in `_pricing_caveats`.
 
 ---
 

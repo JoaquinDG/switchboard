@@ -75,11 +75,23 @@ class RoutingDecision:
 
 
 def estimate_cost(task: Task, spec: ModelSpec) -> float:
-    """Estimated USD cost of running this task on this model."""
-    return (
+    """Estimated USD cost of running this task on this model.
+
+    Applies the model's batch_discount when the task is flagged
+    batch_eligible: a latency-insensitive task can be priced at the rate a
+    vendor's asynchronous batch queue would charge. This is pricing-model
+    work only — Switchboard does not submit anything to a real batch
+    endpoint, so this discount must never reach actual_cost, which prices
+    tokens a provider actually billed for a call that actually happened at
+    the standard synchronous rate.
+    """
+    cost = (
         task.est_input_tokens * spec.input_cost
         + task.est_output_tokens * spec.output_cost
     ) / 1_000_000
+    if task.batch_eligible:
+        cost *= 1.0 - spec.batch_discount
+    return cost
 
 
 def actual_cost(spec: ModelSpec, input_tokens: int, output_tokens: int) -> float:
@@ -264,6 +276,18 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
         f"cost=${top.est_cost_usd:.4f} (score {top.cost_component:.2f}), "
         f"latency={top.spec.latency}",
     ]
+    if task.batch_eligible:
+        if top.spec.batch_discount > 0:
+            parts.append(
+                f"batch-eligible: cost above is {top.spec.model_id}'s batch rate "
+                f"({top.spec.batch_discount:.0%} off standard) — an estimate, "
+                f"Switchboard does not submit to the vendor's batch endpoint"
+            )
+        else:
+            warnings.append(
+                f"task is batch-eligible but {top.spec.model_id} has no "
+                f"batch_discount in the catalog; priced at the standard rate"
+            )
     if len(scored) > 1:
         runner = scored[1]
         parts.append(

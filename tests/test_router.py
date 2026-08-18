@@ -238,5 +238,107 @@ class QualityScoreScaleTests(unittest.TestCase):
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
 
 
+class BatchPricingTests(unittest.TestCase):
+    """ROADMAP item 4: vendors discount their asynchronous batch API by
+    roughly half, and the router previously had no way to see it. Pricing
+    only — Switchboard does not submit anything to a real batch endpoint."""
+
+    def spec(self, **overrides):
+        base = dict(
+            model_id="m1",
+            provider="anthropic",
+            tier="mid",
+            input_cost=2.0,
+            output_cost=10.0,
+        )
+        return ModelSpec(**{**base, **overrides})
+
+    def test_default_batch_discount_is_zero(self):
+        self.assertEqual(self.spec().batch_discount, 0.0)
+
+    def test_batch_discount_out_of_range_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(batch_discount=1.0)
+        with self.assertRaises(ValueError):
+            self.spec(batch_discount=-0.1)
+
+    def test_boolean_batch_discount_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(batch_discount=True)
+
+    def test_needs_fast_response_and_batch_eligible_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            Task(prompt="x", needs_fast_response=True, batch_eligible=True)
+
+    def test_non_batch_eligible_task_ignores_the_discount(self):
+        from switchboard import estimate_cost
+
+        spec = self.spec(batch_discount=0.5)
+        task = Task(prompt="x", est_input_tokens=1_000_000, est_output_tokens=1_000_000)
+        self.assertAlmostEqual(estimate_cost(task, spec), 2.0 + 10.0)
+
+    def test_batch_eligible_task_gets_the_discounted_estimate(self):
+        from switchboard import estimate_cost
+
+        spec = self.spec(batch_discount=0.5)
+        task = Task(
+            prompt="x",
+            est_input_tokens=1_000_000,
+            est_output_tokens=1_000_000,
+            batch_eligible=True,
+        )
+        self.assertAlmostEqual(estimate_cost(task, spec), (2.0 + 10.0) * 0.5)
+
+    def test_batch_eligible_with_no_catalog_discount_prices_at_standard_rate(self):
+        from switchboard import estimate_cost
+
+        spec = self.spec()  # batch_discount defaults to 0.0
+        task = Task(
+            prompt="x",
+            est_input_tokens=1_000_000,
+            est_output_tokens=1_000_000,
+            batch_eligible=True,
+        )
+        self.assertAlmostEqual(estimate_cost(task, spec), 2.0 + 10.0)
+
+    def test_actual_cost_never_applies_the_batch_discount(self):
+        from switchboard import actual_cost
+
+        spec = self.spec(batch_discount=0.5)
+        # actual_cost has no Task and no batch_eligible flag to read: the
+        # real invoice reflects whatever call actually happened, and
+        # Switchboard never actually submits to a batch endpoint.
+        self.assertAlmostEqual(
+            actual_cost(spec, 1_000_000, 1_000_000), actual_cost(self.spec(), 1_000_000, 1_000_000)
+        )
+
+    def test_batch_eligible_routing_can_flip_the_cheaper_choice(self):
+        # Two models priced identically per-token at standard rate; only one
+        # offers a batch discount. A batch-eligible task should now prefer it
+        # under cost_first, which it would not without this feature.
+        cheap_no_batch = self.spec(model_id="cheap-no-batch", tier="small")
+        cheap_with_batch = self.spec(model_id="cheap-with-batch", tier="small", batch_discount=0.5)
+        registry = Registry([cheap_no_batch, cheap_with_batch])
+        task = Task(prompt="summarize this later", complexity=0.1, batch_eligible=True)
+        decision = route(task, registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "cheap-with-batch")
+
+    def test_rationale_names_the_batch_rate_when_applied(self):
+        spec = self.spec(batch_discount=0.5)
+        registry = Registry([spec])
+        task = Task(prompt="x", complexity=0.1, batch_eligible=True)
+        decision = route(task, registry, BALANCED)
+        self.assertIn("batch-eligible", decision.rationale)
+        self.assertIn("50%", decision.rationale)
+
+    def test_rationale_warns_when_batch_eligible_but_no_discount_modeled(self):
+        spec = self.spec()  # batch_discount 0.0
+        registry = Registry([spec])
+        task = Task(prompt="x", complexity=0.1, batch_eligible=True)
+        decision = route(task, registry, BALANCED)
+        self.assertIn("no batch_discount in the catalog", decision.rationale)
+        self.assertIn("no batch_discount in the catalog", "; ".join(decision.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()
