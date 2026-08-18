@@ -54,6 +54,11 @@ class ModelSpec:
     output_cost: float  # USD per 1M output tokens
     latency: str = "medium"  # one of LATENCY_CLASSES
     context_window: int = 200_000
+    # Fraction off input_cost/output_cost when a task runs through this
+    # vendor's asynchronous batch API (e.g. 0.5 for a 50% discount). Default
+    # 0.0 means "not modeled" — the catalog does not claim every vendor
+    # offers one, or at what rate, unless a maintainer has verified it.
+    batch_discount: float = 0.0
     # 0-1 capability score per task type, e.g. {"reasoning": 0.9, "extraction": 0.7}
     capabilities: dict[str, float] = field(default_factory=dict)
 
@@ -77,6 +82,18 @@ class ModelSpec:
             raise ValueError(
                 f"{self.model_id}: context_window must be a positive int, "
                 f"got {self.context_window!r}"
+            )
+        if isinstance(self.batch_discount, bool) or not isinstance(
+            self.batch_discount, (int, float)
+        ):
+            raise ValueError(
+                f"{self.model_id}: batch_discount must be a number, "
+                f"got {self.batch_discount!r}"
+            )
+        if not 0.0 <= self.batch_discount < 1.0:
+            raise ValueError(
+                f"{self.model_id}: batch_discount must be in [0, 1), "
+                f"got {self.batch_discount}"
             )
         # Capability scores are the input the router trusts most; garbage here
         # produces confidently wrong routing, so validate at construction.
