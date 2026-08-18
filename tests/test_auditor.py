@@ -12,6 +12,7 @@ from switchboard import (
     AUDIT_PROMPT_HEADER,
     AUDIT_PROMPT_TEMPLATE,
     BALANCED,
+    Completion,
     ModelSpec,
     MockProvider,
     Policy,
@@ -21,8 +22,10 @@ from switchboard import (
     ScriptedProvider,
     Task,
     audit,
+    audit_consensus,
     demo_registry,
     pick_auditor,
+    pick_auditors,
 )
 
 PRODUCER = "atlas-small"
@@ -327,6 +330,194 @@ class AuditorAvailabilityTests(unittest.TestCase):
                 ProviderPool([provider]),
                 BALANCED,
             )
+
+
+def three_lab_registry() -> Registry:
+    """A producer plus three audit-qualified models on three distinct labs."""
+    caps = {"reasoning": 0.9, "audit": 0.9}
+    return Registry([
+        ModelSpec("producer", "lab-p", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+        ModelSpec("auditor-a", "lab-a", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+        ModelSpec("auditor-b", "lab-b", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+        ModelSpec("auditor-c", "lab-c", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+    ])
+
+
+def three_lab_pool(scripts: dict[str, str]) -> ProviderPool:
+    """One ScriptedProvider per lab, so each auditor can be told to answer
+    differently — MockProvider can only pass or fail wholesale."""
+    labs = {"auditor-a": "lab-a", "auditor-b": "lab-b", "auditor-c": "lab-c"}
+    return ProviderPool([
+        ScriptedProvider({model_id: [text]}, name=labs[model_id])
+        for model_id, text in scripts.items()
+    ])
+
+
+PASS = '{"pass": true, "score": 0.9, "issues": []}'
+FAIL = '{"pass": false, "score": 0.2, "issues": ["bad"]}'
+
+
+class PickAuditorsTests(unittest.TestCase):
+    def test_returns_the_requested_count(self):
+        registry = three_lab_registry()
+        chosen = pick_auditors(registry, registry.get("producer"), BALANCED, 3)
+        self.assertEqual(len(chosen), 3)
+
+    def test_never_includes_the_producer(self):
+        registry = three_lab_registry()
+        chosen = pick_auditors(registry, registry.get("producer"), BALANCED, 3)
+        self.assertNotIn("producer", [m.model_id for m in chosen])
+
+    def test_all_seats_are_distinct_models(self):
+        registry = three_lab_registry()
+        chosen = pick_auditors(registry, registry.get("producer"), BALANCED, 3)
+        self.assertEqual(len({m.model_id for m in chosen}), 3)
+
+    def test_spreads_across_distinct_labs_before_repeating_one(self):
+        registry = three_lab_registry()
+        chosen = pick_auditors(registry, registry.get("producer"), BALANCED, 3)
+        self.assertEqual({m.provider for m in chosen}, {"lab-a", "lab-b", "lab-c"})
+
+    def test_shrinks_rather_than_raises_when_the_catalog_is_too_small(self):
+        registry = two_lab_registry()  # only one non-producer model per side
+        chosen = pick_auditors(registry, registry.get("lab-a-model"), BALANCED, 5)
+        self.assertEqual(len(chosen), 1)  # lab-b-model is the only candidate
+
+    def test_a_fourth_seat_repeats_a_lab_rather_than_going_empty(self):
+        registry = three_lab_registry()
+        chosen = pick_auditors(registry, registry.get("producer"), BALANCED, 4)
+        self.assertEqual(len(chosen), 3)  # only 3 non-producer models exist total
+
+    def test_rejects_a_non_positive_count(self):
+        registry = three_lab_registry()
+        with self.assertRaises(ValueError):
+            pick_auditors(registry, registry.get("producer"), BALANCED, 0)
+
+
+class AuditConsensusTests(unittest.TestCase):
+    """The trap this item names: a 2-1 split must not read as a clean pass."""
+
+    def test_unanimous_pass(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": PASS, "auditor-c": PASS})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertTrue(v.passed)
+        self.assertTrue(v.unanimous)
+        self.assertEqual(v.pass_count, 3)
+        self.assertEqual(v.fail_count, 0)
+
+    def test_unanimous_fail(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": FAIL, "auditor-b": FAIL, "auditor-c": FAIL})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertFalse(v.passed)
+        self.assertTrue(v.unanimous)
+
+    def test_two_one_split_passes_on_majority_but_is_not_unanimous(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": PASS, "auditor-c": FAIL})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertTrue(v.passed)  # 2 of 3 is a majority
+        self.assertFalse(v.unanimous)  # but it must not read as a clean pass
+        self.assertEqual(v.pass_count, 2)
+        self.assertEqual(v.fail_count, 1)
+
+    def test_split_is_not_averaged_away(self):
+        # The trap, checked directly: the disagreement must survive as
+        # visible signal, not be collapsed into a single smooth score.
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": PASS, "auditor-c": FAIL})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertEqual(len(v.verdicts), 3)
+        self.assertTrue(any(not vv.passed for vv in v.verdicts))
+        self.assertTrue(any("split" in i for i in v.issues))
+        self.assertIn("SPLIT", v.describe())
+
+    def test_even_panel_tie_fails_closed(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": FAIL})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 2,
+        )
+        self.assertFalse(v.passed)  # 1-1 is not "more than half"
+        self.assertFalse(v.unanimous)
+
+    def test_cost_is_the_sum_of_every_seat(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": PASS, "auditor-c": PASS})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertAlmostEqual(v.cost_usd, sum(vv.cost_usd for vv in v.verdicts))
+        self.assertGreater(v.cost_usd, max(vv.cost_usd for vv in v.verdicts))
+
+    def test_issues_attribute_each_finding_to_its_auditor(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({"auditor-a": PASS, "auditor-b": PASS, "auditor-c": FAIL})
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertTrue(any(i.startswith("[auditor-c]") for i in v.issues))
+
+    def test_shortfall_is_recorded_not_silently_eaten(self):
+        registry = two_lab_registry()
+        producer = registry.get("lab-a-model")
+        pool = ProviderPool([
+            ScriptedProvider({"lab-b-model": [PASS]}, name="otherlab"),
+        ])
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"), Completion(text="y", model_id="lab-a-model"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertEqual(v.requested_count, 3)
+        self.assertEqual(len(v.verdicts), 1)
+        self.assertTrue(any("requested 3" in i for i in v.issues))
+
+    def test_mean_score_is_reported_alongside_not_instead_of_the_vote(self):
+        registry = three_lab_registry()
+        producer = registry.get("producer")
+        pool = three_lab_pool({
+            "auditor-a": '{"pass": true, "score": 1.0, "issues": []}',
+            "auditor-b": '{"pass": true, "score": 1.0, "issues": []}',
+            "auditor-c": '{"pass": false, "score": 0.0, "issues": ["bad"]}',
+        })
+        v = audit_consensus(
+            Task(prompt="x", task_type="reasoning"),
+            Completion(text="y", model_id="producer"),
+            producer, registry, pool, BALANCED, 3,
+        )
+        self.assertAlmostEqual(v.score, 2 / 3)
+        self.assertTrue(v.passed)  # the vote, not the mean score, decides
+        self.assertFalse(v.unanimous)
 
 
 if __name__ == "__main__":

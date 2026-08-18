@@ -480,6 +480,204 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def three_lab_registry_with_small() -> Registry:
+    """A small-tier producer plus three frontier-tier audit-qualified models
+    on three distinct labs, so a panel has enough independent seats."""
+    caps = {"reasoning": 0.9, "extraction": 0.9, "audit": 0.9}
+    return Registry([
+        ModelSpec("small-producer", "lab-p", "small", 0.1, 0.5, latency="fast",
+                  capabilities=dict(caps)),
+        ModelSpec("auditor-a", "lab-a", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+        ModelSpec("auditor-b", "lab-b", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+        ModelSpec("auditor-c", "lab-c", "frontier", 1.0, 2.0, capabilities=dict(caps)),
+    ])
+
+
+def three_lab_pool_with_producer(auditor_scripts: dict[str, str]) -> ProviderPool:
+    labs = {"auditor-a": "lab-a", "auditor-b": "lab-b", "auditor-c": "lab-c"}
+    providers = [ScriptedProvider({"small-producer": ["draft"]}, name="lab-p")]
+    providers += [
+        ScriptedProvider({model_id: [text]}, name=labs[model_id])
+        for model_id, text in auditor_scripts.items()
+    ]
+    return ProviderPool(providers)
+
+
+class MultiAuditorPolicyValidationTests(unittest.TestCase):
+    def test_multi_auditor_count_defaults_to_one(self):
+        self.assertEqual(BALANCED.multi_auditor_count, 1)
+
+    def test_multi_auditor_complexity_gate_defaults_to_none(self):
+        self.assertIsNone(BALANCED.multi_auditor_complexity_gate)
+
+    def test_rejects_a_zero_count(self):
+        with self.assertRaises(ValueError):
+            Policy("bad", 0.5, 0.3, 0.2, multi_auditor_count=0)
+
+    def test_rejects_a_negative_count(self):
+        with self.assertRaises(ValueError):
+            Policy("bad", 0.5, 0.3, 0.2, multi_auditor_count=-1)
+
+    def test_rejects_a_boolean_count(self):
+        with self.assertRaises(ValueError):
+            Policy("bad", 0.5, 0.3, 0.2, multi_auditor_count=True)
+
+    def test_rejects_a_gate_outside_zero_one(self):
+        with self.assertRaises(ValueError):
+            Policy("bad", 0.5, 0.3, 0.2, multi_auditor_complexity_gate=1.5)
+
+    def test_accepts_a_gate_of_none_explicitly(self):
+        Policy("ok", 0.5, 0.3, 0.2, multi_auditor_complexity_gate=None)  # no raise
+
+    def test_task_high_stakes_defaults_to_false(self):
+        self.assertFalse(Task(prompt="x").high_stakes)
+
+
+class MultiAuditorBrokerTests(unittest.TestCase):
+    """Policy knob + Task flag together decide whether a task gets a panel
+    instead of one auditor — the trap is letting a 2-1 split read as pass."""
+
+    def test_default_policy_never_uses_a_panel(self):
+        # multi_auditor_count defaults to 1; high_stakes alone must not be
+        # enough on its own to spend a panel's worth of audit calls.
+        result = make_broker().run(
+            Task(prompt="summarize", task_type="summarization", high_stakes=True)
+        )
+        self.assertIsNone(result.attempts[0].consensus_verdicts)
+
+    def test_high_stakes_task_triggers_a_panel(self):
+        policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": PASS_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+        )
+        self.assertIsNotNone(result.attempts[0].consensus_verdicts)
+        self.assertEqual(len(result.attempts[0].consensus_verdicts), 3)
+        self.assertTrue(result.attempts[0].audit_unanimous)
+
+    def test_complexity_gate_triggers_a_panel_without_high_stakes(self):
+        policy = Policy(
+            "panel", 0.5, 0.3, 0.2, multi_auditor_count=3,
+            multi_auditor_complexity_gate=0.7,
+        )
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": PASS_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.8)
+        )
+        self.assertIsNotNone(result.attempts[0].consensus_verdicts)
+
+    def test_below_the_complexity_gate_and_not_high_stakes_uses_one_auditor(self):
+        policy = Policy(
+            "panel", 0.5, 0.3, 0.2, multi_auditor_count=3,
+            multi_auditor_complexity_gate=0.7,
+        )
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": PASS_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2)
+        )
+        self.assertIsNone(result.attempts[0].consensus_verdicts)
+        self.assertIsNone(result.attempts[0].audit_unanimous)
+
+    def test_a_split_panel_still_passes_on_majority(self):
+        policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": FAIL_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+        )
+        self.assertTrue(result.verified)
+        self.assertFalse(result.attempts[0].audit_unanimous)
+
+    def test_a_split_panel_is_not_silently_a_clean_pass(self):
+        # The item's trap, checked at the Broker boundary: the disagreement
+        # must be readable from the result, not just from internal objects.
+        policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": FAIL_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+        )
+        detail = result.attempts[0].consensus_verdicts
+        self.assertEqual(sum(1 for d in detail if d["passed"]), 2)
+        self.assertEqual(sum(1 for d in detail if not d["passed"]), 1)
+        self.assertTrue(any("split" in i for i in result.attempts[0].audit_issues))
+
+    def test_a_majority_failing_panel_escalates(self):
+        policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": FAIL_VERDICT, "auditor-b": FAIL_VERDICT, "auditor-c": PASS_VERDICT,
+        })
+        result = Broker(registry, pool, policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+        )
+        self.assertTrue(result.escalated)
+
+    def test_panel_cost_is_larger_than_a_single_auditor_and_lands_in_audit_cost(self):
+        # "the extra cost reported in the existing cost accounting" (item 7):
+        # no new cost field, the panel's spend must show up in the same
+        # audit_cost_usd a single auditor already reports through.
+        registry = three_lab_registry_with_small()
+        panel_policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        panel_pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": PASS_VERDICT,
+        })
+        panel_result = Broker(registry, panel_pool, panel_policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+        )
+
+        single_policy = Policy("single", 0.5, 0.3, 0.2)
+        single_pool = three_lab_pool_with_producer({"auditor-a": PASS_VERDICT})
+        single_result = Broker(registry, single_pool, single_policy).run(
+            Task(prompt="x", task_type="reasoning", complexity=0.2)
+        )
+
+        self.assertGreater(panel_result.audit_cost_usd, single_result.audit_cost_usd)
+        # One attempt, no escalation (unanimous pass) — the whole panel's
+        # spend is this one attempt's audit_cost_usd, and nothing else.
+        self.assertEqual(len(panel_result.attempts), 1)
+        self.assertAlmostEqual(
+            panel_result.attempts[0].audit_cost_usd, panel_result.audit_cost_usd
+        )
+
+    def test_trace_records_final_audit_unanimous(self):
+        policy = Policy("panel", 0.5, 0.3, 0.2, multi_auditor_count=3)
+        registry = three_lab_registry_with_small()
+        pool = three_lab_pool_with_producer({
+            "auditor-a": PASS_VERDICT, "auditor-b": PASS_VERDICT, "auditor-c": FAIL_VERDICT,
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            Broker(registry, pool, policy, trace_path=trace).run(
+                Task(prompt="x", task_type="reasoning", complexity=0.2, high_stakes=True)
+            )
+            record = json.loads(trace.read_text().strip())
+            self.assertIn("final_audit_unanimous", record)
+            self.assertFalse(record["final_audit_unanimous"])
+            self.assertIn("consensus_verdicts", record["attempts"][0])
+            self.assertEqual(len(record["attempts"][0]["consensus_verdicts"]), 3)
+
+    def test_trace_final_audit_unanimous_is_none_without_a_panel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            make_broker(trace_path=trace).run(Task(prompt="x", task_type="summarization"))
+            record = json.loads(trace.read_text().strip())
+            self.assertIsNone(record["final_audit_unanimous"])
+
+
 class OutputCeilingTests(unittest.TestCase):
     """Three separate truncation incidents in one session say the protocol's
     1024 default is too low once thinking tokens come out of the same budget."""
