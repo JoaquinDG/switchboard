@@ -95,6 +95,22 @@ class Provider(Protocol):
         ...
 
 
+class AsyncProvider(Protocol):
+    """The async counterpart to Provider: same one-method contract, awaited.
+
+    Exists so independent work — N steps of a plan, or several audits — can
+    be in flight at once instead of blocking one call at a time behind the
+    next. The sync `Provider` stays the primary interface; this is additive,
+    so no existing adapter or test has to change.
+    """
+
+    name: str
+
+    async def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        """Async twin of `Provider.complete`. Same error contract."""
+        ...
+
+
 class ProviderPool:
     """Maps provider names (as used in the registry) to Provider instances."""
 
@@ -120,6 +136,53 @@ class ProviderPool:
         return sorted(self._providers)
 
 
+class AsyncProviderPool:
+    """Maps provider names to AsyncProvider instances. Mirrors ProviderPool."""
+
+    def __init__(self, providers: list[AsyncProvider]) -> None:
+        self._providers = {p.name: p for p in providers}
+
+    def get(self, name: str) -> AsyncProvider:
+        """Resolve a provider name from the catalog to a live async adapter."""
+        try:
+            return self._providers[name]
+        except KeyError:
+            raise KeyError(
+                f"no async provider registered for {name!r}; "
+                f"available: {sorted(self._providers)}"
+            ) from None
+
+    def has(self, name: str) -> bool:
+        """Whether a provider is wired up, without raising if it is not."""
+        return name in self._providers
+
+    def names(self) -> list[str]:
+        """Registered provider names, sorted — handy in error messages."""
+        return sorted(self._providers)
+
+
+def _mock_response(model_id: str, prompt: str) -> Completion:
+    """The canned completion MockProvider and AsyncMockProvider both return.
+
+    Factored out so the offline behavior (audit sentinel, FORCE_AUDIT_FAIL,
+    echoed text) can't drift between the sync and async stand-ins — they are
+    two adapters over one policy, not two policies that happen to agree today.
+    """
+    if AUDIT_PROMPT_HEADER in prompt:
+        if "FORCE_AUDIT_FAIL" in prompt:
+            text = '{"pass": false, "score": 0.35, "issues": ["forced failure for testing"]}'
+        else:
+            text = '{"pass": true, "score": 0.9, "issues": []}'
+    else:
+        text = f"[{model_id}] completed: {prompt[:80]}"
+    return Completion(
+        text=text,
+        model_id=model_id,
+        input_tokens=max(1, len(prompt) // 4),
+        output_tokens=max(1, len(text) // 4),
+    )
+
+
 class MockProvider:
     """Deterministic offline provider for tests, evals, and demos.
 
@@ -139,19 +202,17 @@ class MockProvider:
     AUDIT_SENTINEL = AUDIT_PROMPT_HEADER
 
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
-        if self.AUDIT_SENTINEL in prompt:
-            if "FORCE_AUDIT_FAIL" in prompt:
-                text = '{"pass": false, "score": 0.35, "issues": ["forced failure for testing"]}'
-            else:
-                text = '{"pass": true, "score": 0.9, "issues": []}'
-        else:
-            text = f"[{model_id}] completed: {prompt[:80]}"
-        return Completion(
-            text=text,
-            model_id=model_id,
-            input_tokens=max(1, len(prompt) // 4),
-            output_tokens=max(1, len(text) // 4),
-        )
+        return _mock_response(model_id, prompt)
+
+
+class AsyncMockProvider:
+    """Async counterpart to MockProvider. Identical offline behavior, awaited."""
+
+    name = "mock"
+    synthetic = True
+
+    async def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        return _mock_response(model_id, prompt)
 
 
 def mock_pool(providers: list[str] | object) -> ProviderPool:
@@ -176,6 +237,20 @@ def mock_pool(providers: list[str] | object) -> ProviderPool:
         provider.name = name  # shadow the class attribute per instance
         pool.append(provider)
     return ProviderPool(pool)
+
+
+def async_mock_pool(providers: list[str] | object) -> AsyncProviderPool:
+    """AsyncProviderPool equivalent of `mock_pool`. Same acceptance rules."""
+    if hasattr(providers, "all"):
+        names = sorted({m.provider for m in providers.all()})  # type: ignore[union-attr]
+    else:
+        names = sorted(set(providers))  # type: ignore[arg-type]
+    pool = []
+    for name in names:
+        provider = AsyncMockProvider()
+        provider.name = name
+        pool.append(provider)
+    return AsyncProviderPool(pool)
 
 
 class ScriptedProvider:
@@ -213,18 +288,7 @@ class ScriptedProvider:
 
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         self.calls.append((model_id, prompt))
-        queue = self._script.get(model_id)
-        if queue:
-            item = queue.pop(0) if len(queue) > 1 else queue[0]
-        elif self._default is not None:
-            item = self._default
-        else:
-            raise ProviderError(
-                f"ScriptedProvider has no script for {model_id!r}; "
-                f"scripted models: {sorted(self._script)}",
-                provider=self.name,
-                model_id=model_id,
-            )
+        item = _next_scripted_item(self._script, self._default, self.name, model_id)
         if isinstance(item, Exception):
             raise item
         return Completion(
@@ -233,6 +297,61 @@ class ScriptedProvider:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(item) // 4),
         )
+
+
+class AsyncScriptedProvider:
+    """Async counterpart to ScriptedProvider. Identical scripting rules."""
+
+    def __init__(
+        self,
+        script: dict[str, list[str | Exception]] | None = None,
+        name: str = "mock",
+        default: str | Exception | None = None,
+    ) -> None:
+        self.name = name
+        self.synthetic = True
+        self._script: dict[str, list[str | Exception]] = {
+            k: list(v) for k, v in (script or {}).items()
+        }
+        self._default = default
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        self.calls.append((model_id, prompt))
+        item = _next_scripted_item(self._script, self._default, self.name, model_id)
+        if isinstance(item, Exception):
+            raise item
+        return Completion(
+            text=item,
+            model_id=model_id,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(item) // 4),
+        )
+
+
+def _next_scripted_item(
+    script: dict[str, list[str | Exception]],
+    default: str | Exception | None,
+    name: str,
+    model_id: str,
+) -> str | Exception:
+    """Pop the next queued response for `model_id`, or fall back to default.
+
+    Shared by ScriptedProvider and AsyncScriptedProvider so the queueing rule
+    — repeat the last entry once the queue is down to one — can't quietly
+    diverge between the two.
+    """
+    queue = script.get(model_id)
+    if queue:
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+    if default is not None:
+        return default
+    raise ProviderError(
+        f"ScriptedProvider has no script for {model_id!r}; "
+        f"scripted models: {sorted(script)}",
+        provider=name,
+        model_id=model_id,
+    )
 
 
 @dataclass
@@ -263,3 +382,27 @@ class FlakyProvider:
         if self.calls <= self.fail_times:
             raise self.error
         return self.inner.complete(model_id, prompt, max_tokens)
+
+
+@dataclass
+class AsyncFlakyProvider:
+    """Async counterpart to FlakyProvider. Same fail-then-succeed contract."""
+
+    inner: AsyncProvider
+    fail_times: int = 1
+    error: Exception = field(default_factory=lambda: ProviderUnavailable("injected outage"))
+    calls: int = 0
+
+    @property
+    def name(self) -> str:  # type: ignore[override]
+        return self.inner.name
+
+    @property
+    def synthetic(self) -> bool:
+        return getattr(self.inner, "synthetic", False)
+
+    async def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.error
+        return await self.inner.complete(model_id, prompt, max_tokens)

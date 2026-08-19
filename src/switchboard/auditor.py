@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from .policies import Policy, Task
 from .prompts import AUDIT_PROMPT_TEMPLATE
-from .providers.base import Completion, ProviderPool
+from .providers.base import AsyncProviderPool, Completion, ProviderPool
 from .registry import ModelSpec, Registry
 from .router import actual_cost
 
@@ -29,6 +29,7 @@ __all__ = [
     "AUDIT_PROMPT_TEMPLATE",
     "AuditVerdict",
     "audit",
+    "audit_async",
     "pick_auditor",
 ]
 
@@ -189,25 +190,28 @@ def _parse_verdict(text: str) -> tuple[bool, float, list[str]]:
     return passed, score, issues
 
 
-def audit(
-    task: Task,
-    output: Completion,
-    producer: ModelSpec,
-    registry: Registry,
-    providers: ProviderPool,
-    policy: Policy,
-) -> AuditVerdict:
-    """Have a different model grade the producer's output."""
-    auditor_spec = pick_auditor(registry, producer, policy)
-    provider = providers.get(auditor_spec.provider)
-    prompt = AUDIT_PROMPT_TEMPLATE.format(
+def _audit_prompt(task: Task, output: Completion) -> str:
+    return AUDIT_PROMPT_TEMPLATE.format(
         task_type=task.task_type,
         prompt=task.prompt,
         output=output.text,
     )
-    result = provider.complete(
-        auditor_spec.model_id, prompt, max_tokens=policy.max_output_tokens
-    )
+
+
+def _build_verdict(
+    output: Completion,
+    producer: ModelSpec,
+    auditor_spec: ModelSpec,
+    provider: object,
+    result: Completion,
+    policy: Policy,
+) -> AuditVerdict:
+    """Turn a raw auditor completion into a verdict.
+
+    Shared by `audit` and `audit_async` so the parsing, truncation note, and
+    threshold check — the actual judgement logic — can't drift between the
+    sync and async call paths. Only *getting* `result` differs between them.
+    """
     passed, score, issues = _parse_verdict(result.text)
 
     if output.truncated:
@@ -242,3 +246,37 @@ def audit(
         cost_usd=actual_cost(auditor_spec, result.input_tokens, result.output_tokens),
         synthetic=getattr(provider, "synthetic", False),
     )
+
+
+def audit(
+    task: Task,
+    output: Completion,
+    producer: ModelSpec,
+    registry: Registry,
+    providers: ProviderPool,
+    policy: Policy,
+) -> AuditVerdict:
+    """Have a different model grade the producer's output."""
+    auditor_spec = pick_auditor(registry, producer, policy)
+    provider = providers.get(auditor_spec.provider)
+    result = provider.complete(
+        auditor_spec.model_id, _audit_prompt(task, output), max_tokens=policy.max_output_tokens
+    )
+    return _build_verdict(output, producer, auditor_spec, provider, result, policy)
+
+
+async def audit_async(
+    task: Task,
+    output: Completion,
+    producer: ModelSpec,
+    registry: Registry,
+    providers: AsyncProviderPool,
+    policy: Policy,
+) -> AuditVerdict:
+    """Async counterpart to `audit`: same selection and verdict logic, awaited."""
+    auditor_spec = pick_auditor(registry, producer, policy)
+    provider = providers.get(auditor_spec.provider)
+    result = await provider.complete(
+        auditor_spec.model_id, _audit_prompt(task, output), max_tokens=policy.max_output_tokens
+    )
+    return _build_verdict(output, producer, auditor_spec, provider, result, policy)
