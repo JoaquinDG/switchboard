@@ -6,10 +6,12 @@ from pathlib import Path
 from switchboard import (
     BALANCED,
     COST_FIRST,
+    QUALITY_FIRST,
     Broker,
     Completion,
     ModelSpec,
     MockProvider,
+    NoQualifiedModelError,
     Policy,
     ProviderPool,
     ProviderUnavailable,
@@ -19,6 +21,7 @@ from switchboard import (
     build_retry_prompt,
     demo_registry,
     pick_auditor,
+    route,
 )
 
 PASS_VERDICT = '{"pass": true, "score": 0.9, "issues": []}'
@@ -514,3 +517,158 @@ class OutputCeilingTests(unittest.TestCase):
     def test_a_zero_ceiling_is_refused(self):
         with self.assertRaises(ValueError):
             Policy("bad", 0.5, 0.3, 0.2, max_output_tokens=0)
+
+
+class CountingMockProvider:
+    """Wraps MockProvider and records every model_id it was actually asked
+    to complete, so a test can prove the shadow policy never reaches here."""
+
+    name = "mock"
+    synthetic = True
+
+    def __init__(self):
+        self._inner = MockProvider()
+        self.calls: list[str] = []
+
+    def complete(self, model_id, prompt, max_tokens=1024):
+        self.calls.append(model_id)
+        return self._inner.complete(model_id, prompt, max_tokens=max_tokens)
+
+
+# A task where COST_FIRST and QUALITY_FIRST are known to disagree on the demo
+# registry: cost dominance sends COST_FIRST to the cheapest qualified model
+# (atlas-small) while quality dominance sends QUALITY_FIRST to the best-rated
+# one (atlas-frontier). Low complexity keeps every model qualified so the
+# disagreement is a genuine scoring tradeoff, not a gate artifact.
+_DISAGREEMENT_TASK = Task(prompt="pull the key facts", task_type="extraction", complexity=0.2)
+
+
+class ShadowRoutingTests(unittest.TestCase):
+    """ROADMAP item 8: a second policy's routing decision, computed for
+    comparison, that must never execute, never audit, and never change what
+    actually happens to the task."""
+
+    def test_no_shadow_policy_means_no_shadow_decision(self):
+        result = make_broker().run(Task(prompt="x", task_type="summarization"))
+        self.assertIsNone(result.shadow_decision)
+        self.assertIsNone(result.shadow_agrees)
+
+    def test_shadow_policy_reports_what_it_would_have_chosen(self):
+        broker = Broker(
+            demo_registry(), ProviderPool([MockProvider()]), COST_FIRST,
+            shadow_policy=QUALITY_FIRST,
+        )
+        result = broker.run(_DISAGREEMENT_TASK)
+        self.assertIsNotNone(result.shadow_decision)
+        self.assertEqual(result.shadow_decision.policy_name, "quality_first")
+        # The two policies are known to disagree on this task (see the
+        # module-level comment); this is the interesting case, not a fluke.
+        self.assertNotEqual(result.shadow_decision.chosen.model_id, result.final_model)
+        self.assertFalse(result.shadow_agrees)
+
+    def test_shadow_agrees_when_the_shadow_policy_matches_the_real_one(self):
+        # Same policy on both sides is a degenerate but meaningful case: two
+        # identical policies must always agree, since routing is deterministic.
+        broker = Broker(
+            demo_registry(), ProviderPool([MockProvider()]), BALANCED,
+            shadow_policy=BALANCED,
+        )
+        result = broker.run(Task(prompt="x", task_type="summarization"))
+        self.assertTrue(result.shadow_agrees)
+        self.assertEqual(result.shadow_decision.chosen.model_id, result.attempts[0].model_id)
+
+    def test_shadow_policy_never_calls_a_provider(self):
+        # Run the same disagreement-prone task with and without a shadow
+        # policy and compare exactly which models the provider was asked to
+        # complete. If the shadow ever executed, atlas-frontier (its choice)
+        # would show up in the call log even though COST_FIRST never routes
+        # there for this task.
+        plain_provider = CountingMockProvider()
+        Broker(demo_registry(), ProviderPool([plain_provider]), COST_FIRST).run(
+            _DISAGREEMENT_TASK
+        )
+
+        shadowed_provider = CountingMockProvider()
+        Broker(
+            demo_registry(), ProviderPool([shadowed_provider]), COST_FIRST,
+            shadow_policy=QUALITY_FIRST,
+        ).run(_DISAGREEMENT_TASK)
+
+        # atlas-frontier legitimately gets called here as the AUDITOR of
+        # atlas-small's output (most_capable auditor selection) -- that is
+        # real work the real decision already does. What matters is that
+        # adding a shadow policy calls nothing beyond what the plain run
+        # already called, in the same order.
+        self.assertEqual(plain_provider.calls, shadowed_provider.calls)
+
+    def test_a_shadow_policy_that_raises_does_not_break_the_real_run(self):
+        # A shadow policy set to fail loudly on no qualified model must still
+        # not be able to take the real request down with it -- it is only
+        # ever being evaluated, not trusted with the actual task.
+        strict_shadow = Policy(
+            "strict_raise", 0.5, 0.3, 0.2,
+            capability_margin=0.9, on_no_qualified_model="raise",
+        )
+        task = Task(prompt="write something", task_type="creative", complexity=0.05)
+        # Sanity check the fixture actually forces the failure mode being
+        # tested: nothing in the demo registry clears a 0.95 creative bar.
+        with self.assertRaises(NoQualifiedModelError):
+            route(task, demo_registry(), strict_shadow)
+
+        broker = Broker(
+            demo_registry(), ProviderPool([MockProvider()]), BALANCED,
+            shadow_policy=strict_shadow,
+        )
+        result = broker.run(task)  # must not raise
+        self.assertIsNone(result.shadow_decision)
+        self.assertIsNone(result.shadow_agrees)
+        self.assertTrue(result.final_text)  # the real routing decision still ran
+
+    def test_trace_carries_shadow_fields_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(
+                demo_registry(), ProviderPool([MockProvider()]), COST_FIRST,
+                trace_path=trace, shadow_policy=QUALITY_FIRST,
+            )
+            result = broker.run(_DISAGREEMENT_TASK)
+            record = json.loads(trace.read_text().strip())
+            self.assertEqual(record["shadow_policy"], "quality_first")
+            self.assertEqual(record["shadow_chosen_model"], result.shadow_decision.chosen.model_id)
+            self.assertIsInstance(record["shadow_est_cost_usd"], float)
+            self.assertIsInstance(record["chosen_est_cost_usd"], float)
+            self.assertFalse(record["shadow_agrees"])
+            self.assertIn("policy=quality_first", record["shadow_rationale"])
+
+    def test_trace_shadow_fields_are_null_without_a_shadow_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            make_broker(trace_path=trace).run(Task(prompt="x", task_type="summarization"))
+            record = json.loads(trace.read_text().strip())
+            for key in (
+                "shadow_policy", "shadow_chosen_model", "shadow_est_cost_usd",
+                "chosen_est_cost_usd", "shadow_agrees", "shadow_rationale",
+            ):
+                self.assertIn(key, record)
+                self.assertIsNone(record[key])
+
+    def test_shadow_routing_survives_escalation_on_the_real_side(self):
+        # The shadow decision is computed once, up front, from the initial
+        # task -- it has no escalation of its own. Confirm a real escalation
+        # (audit fail -> retry on a stronger tier) doesn't disturb it.
+        task = Task(
+            prompt="FORCE_AUDIT_FAIL do something easy", task_type="extraction", complexity=0.2
+        )
+        broker = Broker(
+            demo_registry(), ProviderPool([MockProvider()]), COST_FIRST,
+            shadow_policy=QUALITY_FIRST,
+        )
+        result = broker.run(task)
+        self.assertTrue(result.escalated)
+        self.assertIsNotNone(result.shadow_decision)
+        # shadow_agrees compares against the INITIAL model, not the escalated
+        # final one -- the shadow policy was never given a chance to escalate.
+        self.assertEqual(
+            result.shadow_agrees,
+            result.shadow_decision.chosen.model_id == result.attempts[0].model_id,
+        )

@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .auditor import AuditVerdict, audit
-from .policies import Policy, Task
+from .policies import NoQualifiedModelError, Policy, Task
 from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
 from .registry import TIER_RANK, ModelSpec, Registry
@@ -210,6 +210,25 @@ class BrokerResult:
     audit_cost_usd: float = 0.0
     baseline_cost_usd: float = 0.0
     baseline_model: str = ""
+    # Set only when the Broker was constructed with `shadow_policy`: what a
+    # SECOND policy would have chosen for this same task, routed but never
+    # executed, never audited, and never allowed to influence the real
+    # decision above. Comparison data at zero extra inference cost.
+    shadow_decision: RoutingDecision | None = None
+
+    @property
+    def shadow_agrees(self) -> bool | None:
+        """Whether the shadow policy would have routed to the same model.
+
+        None when no shadow policy was configured. Compares INITIAL routing
+        choices only — the shadow decision has no escalation or failover of
+        its own to compare against, since it never ran.
+        """
+        if self.shadow_decision is None:
+            return None
+        if not self.attempts:
+            return None
+        return self.shadow_decision.chosen.model_id == self.attempts[0].model_id
 
     @property
     def escalated(self) -> bool:
@@ -263,6 +282,7 @@ class Broker:
         *,
         triage_use_model: bool = False,
         plan_use_model: bool = False,
+        shadow_policy: Policy | None = None,
     ) -> None:
         self.registry = registry
         self.providers = providers
@@ -275,6 +295,11 @@ class Broker:
         # Opt-in: let a cheap model propose the decomposition when the
         # heuristic reports it cannot judge. Off by default, like triage's.
         self.plan_use_model = plan_use_model
+        # Opt-in: a second policy scored against every task purely for
+        # comparison — see `_shadow_route`. `None` (the default) costs
+        # nothing extra; routing under a shadow policy is pure arithmetic
+        # over the same registry, so even enabled it adds no inference spend.
+        self.shadow_policy = shadow_policy
 
     def run(self, task: Task) -> BrokerResult:
         """Route, execute, verify, and escalate or reroute as needed.
@@ -305,6 +330,7 @@ class Broker:
             decision = replace(
                 decision, rationale=f"{triage_verdict.describe()}; {decision.rationale}"
             )
+        shadow_decision = self._shadow_route(task)
         spec = decision.chosen
         attempts: list[Attempt] = []
         escalations_used = 0
@@ -344,7 +370,9 @@ class Broker:
                     else self._failover_target(decision, tried)
                 )
                 if fallback is None or failovers_used >= self.policy.max_provider_failovers:
-                    result = self._finalize(task, decision, attempts, "", spec, first_success, triage_verdict)
+                    result = self._finalize(
+                        task, decision, attempts, "", spec, first_success, triage_verdict, shadow_decision
+                    )
                     self._trace(task, decision, result)
                     raise ProviderError(
                         f"all routing options exhausted after {len(attempts)} provider "
@@ -392,7 +420,8 @@ class Broker:
             )
             if not can_escalate:
                 result = self._finalize(
-                    task, decision, attempts, output.text, spec, first_success, triage_verdict
+                    task, decision, attempts, output.text, spec, first_success,
+                    triage_verdict, shadow_decision,
                 )
                 self._trace(task, decision, result)
                 return result
@@ -717,6 +746,23 @@ class Broker:
             tier = _ESCALATION_ORDER.get(tier)
         return None
 
+    def _shadow_route(self, task: Task) -> RoutingDecision | None:
+        """Route the same task under `self.shadow_policy`, for comparison only.
+
+        This is routing math over the already-loaded registry — no provider is
+        called, nothing is audited, and the result never feeds back into the
+        real decision. `None` when no shadow policy is configured, or when the
+        shadow policy itself can't produce a decision (e.g. it is set to raise
+        on no qualified model): a policy someone is merely evaluating must
+        never be able to break the real request it is riding along with.
+        """
+        if self.shadow_policy is None:
+            return None
+        try:
+            return route(task, self.registry, self.shadow_policy)
+        except (NoQualifiedModelError, ValueError):
+            return None
+
     def _baseline_model(self, task: Task) -> ModelSpec:
         """What "always use the best model" would have meant for this task."""
         return max(
@@ -733,6 +779,7 @@ class Broker:
         final_spec: ModelSpec,
         first_success: Completion | None,
         triage_verdict: Triage | None = None,
+        shadow_decision: RoutingDecision | None = None,
     ) -> BrokerResult:
         last = attempts[-1] if attempts else None
         baseline_spec = self._baseline_model(task)
@@ -761,6 +808,7 @@ class Broker:
             audit_cost_usd=sum(a.audit_cost_usd for a in attempts),
             baseline_cost_usd=baseline_cost,
             baseline_model=baseline_spec.model_id,
+            shadow_decision=shadow_decision,
         )
 
     def _trace(self, task: Task, decision: RoutingDecision, result: BrokerResult) -> None:
@@ -796,6 +844,26 @@ class Broker:
             "baseline_model": result.baseline_model,
             "baseline_cost_usd": round(result.baseline_cost_usd, 8),
             "savings_vs_baseline_usd": round(result.savings_vs_baseline_usd, 8),
+            # Shadow routing (ROADMAP item 8): a second policy's decision on
+            # this same task, computed but never run — see Broker.shadow_policy.
+            # All null when no shadow policy is configured. Costs on both
+            # sides here are ESTIMATES from routing time, not observed spend,
+            # so they compare like with like: `chosen_est_cost_usd` is what
+            # the real decision itself estimated, not `total_cost_usd` (which
+            # is the real, executed, audited-and-possibly-escalated bill).
+            "shadow_policy": result.shadow_decision.policy_name if result.shadow_decision else None,
+            "chosen_est_cost_usd": (
+                round(decision.ranked[0].est_cost_usd, 8) if result.shadow_decision else None
+            ),
+            "shadow_chosen_model": (
+                result.shadow_decision.chosen.model_id if result.shadow_decision else None
+            ),
+            "shadow_est_cost_usd": (
+                round(result.shadow_decision.ranked[0].est_cost_usd, 8)
+                if result.shadow_decision else None
+            ),
+            "shadow_agrees": result.shadow_agrees,
+            "shadow_rationale": result.shadow_decision.rationale if result.shadow_decision else None,
             "attempts": [asdict(a) for a in result.attempts],
             "rationale": result.routing_rationale,
         }
