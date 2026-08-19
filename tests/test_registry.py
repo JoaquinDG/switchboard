@@ -66,6 +66,21 @@ class ModelSpecValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.spec(model_id="")
 
+    def test_cache_discount_defaults_to_ninety_percent(self):
+        self.assertEqual(self.spec().cache_discount, 0.9)
+
+    def test_cache_discount_above_one_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(cache_discount=1.1)
+
+    def test_cache_discount_below_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(cache_discount=-0.1)
+
+    def test_cache_discount_boolean_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(cache_discount=True)
+
 
 class RegistryTests(unittest.TestCase):
     def test_duplicate_model_id_rejected(self):
