@@ -1,0 +1,15 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs in the workflows, which is only safe
+  # if something keeps them current. This is that something: it opens a PR
+  # when a pinned action publishes a new release, updating the SHA and the
+  # version comment together. CI gates the PR like any other change.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
