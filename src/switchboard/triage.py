@@ -368,5 +368,6 @@ def triage_task(
         est_input_tokens=task.est_input_tokens,
         est_output_tokens=task.est_output_tokens,
         needs_fast_response=task.needs_fast_response,
+        assumed_cache_hit_rate=task.assumed_cache_hit_rate,
     )
     return resolved, verdict

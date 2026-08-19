@@ -54,6 +54,14 @@ class ModelSpec:
     output_cost: float  # USD per 1M output tokens
     latency: str = "medium"  # one of LATENCY_CLASSES
     context_window: int = 200_000
+    # Fraction knocked off input_cost for a token served from a prompt cache
+    # instead of processed fresh, e.g. 0.9 means a cached read costs 10% of a
+    # cache miss. Defaults to 0.9, the figure most major vendors publish for
+    # cache reads -- an ASSUMPTION in the same spirit as UNKNOWN_CAPABILITY_PRIOR,
+    # not a verified number, unless the model's own _source/_note in the
+    # catalog says a real vendor rate was used instead. Only takes effect when
+    # a Task sets assumed_cache_hit_rate above 0.
+    cache_discount: float = 0.9
     # 0-1 capability score per task type, e.g. {"reasoning": 0.9, "extraction": 0.7}
     capabilities: dict[str, float] = field(default_factory=dict)
 
@@ -77,6 +85,13 @@ class ModelSpec:
             raise ValueError(
                 f"{self.model_id}: context_window must be a positive int, "
                 f"got {self.context_window!r}"
+            )
+        if isinstance(self.cache_discount, bool) or not isinstance(
+            self.cache_discount, (int, float)
+        ) or not 0.0 <= self.cache_discount <= 1.0:
+            raise ValueError(
+                f"{self.model_id}: cache_discount must be in [0, 1], "
+                f"got {self.cache_discount!r}"
             )
         # Capability scores are the input the router trusts most; garbage here
         # produces confidently wrong routing, so validate at construction.
