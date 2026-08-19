@@ -55,6 +55,173 @@ _CONTEXT_TEMPLATE = """{prompt}
 {context}
 --- END OF STEP {step_id} OUTPUT ---"""
 
+# -- shared routing/accounting helpers -------------------------------------
+#
+# Free functions rather than Broker methods so AsyncBroker (async_broker.py)
+# can call the exact same routing, escalation, failover, baseline-pricing and
+# result-construction logic instead of a re-typed copy of it. Only the
+# provider and auditor calls actually need to differ between the sync and
+# async brokers; nothing else does. Broker's own methods below are thin
+# wrappers that close over `self` and delegate here.
+
+
+def _is_provider_synthetic(providers, provider_name: str) -> bool:
+    """Whether the named provider is a canned stand-in, not a real vendor.
+
+    Looked up defensively: a provider that failed to resolve tells us
+    nothing about syntheticity, and this must never raise on top of an
+    already-failed attempt.
+    """
+    try:
+        provider = providers.get(provider_name)
+    except KeyError:
+        return False
+    return getattr(provider, "synthetic", False)
+
+
+def _should_audit(policy: Policy, registry: Registry) -> bool:
+    return policy.audit_enabled and len(registry) >= 2
+
+
+def _pick_failover_target(
+    decision: RoutingDecision, tried: set[str]
+) -> ModelSpec | None:
+    """Next-best model from the same routing decision, not yet attempted."""
+    for scored in decision.ranked:
+        if scored.spec.model_id not in tried:
+            return scored.spec
+    return None
+
+
+def _pick_escalation_target(
+    registry: Registry, policy: Policy, spec: ModelSpec, task: Task, tried: set[str]
+) -> ModelSpec | None:
+    """Best model in the next tier up, scored under the same policy.
+
+    Two corrections live here. It was once hardcoded to "reasoning", so a
+    failed coding task escalated to whichever model reasoned best. It then
+    maximised capability for the task type — which quietly ignored the
+    policy, so a cost-first run could fail an audit and jump to the priciest
+    model in the catalog. Moving up a tier is already the quality step;
+    *which* model in that tier is still a cost/quality tradeoff, and the
+    policy is what decides tradeoffs.
+    """
+    tier = _ESCALATION_ORDER.get(spec.tier)
+    while tier is not None:
+        candidates = registry.by_tier(tier)
+        untried = [m for m in candidates if m.model_id not in tried]
+        pool = untried or candidates
+        if pool:
+            return score_models(task, pool, registry, policy)[0].spec
+        tier = _ESCALATION_ORDER.get(tier)
+    return None
+
+
+def _pick_baseline_spec(registry: Registry, task: Task) -> ModelSpec:
+    """What "always use the best model" would have meant for this task."""
+    return max(
+        registry.all(),
+        key=lambda m: (m.capability_for(task.task_type), TIER_RANK.get(m.tier, 0)),
+    )
+
+
+def _build_broker_result(
+    registry: Registry,
+    task: Task,
+    decision: RoutingDecision,
+    attempts: list[Attempt],
+    final_text: str,
+    final_spec: ModelSpec,
+    first_success: Completion | None,
+    triage_verdict: Triage | None = None,
+) -> BrokerResult:
+    last = attempts[-1] if attempts else None
+    baseline_spec = _pick_baseline_spec(registry, task)
+    # Price the baseline on tokens we actually observed where possible; fall
+    # back to the task's estimates when nothing completed. Token counts
+    # differ per model, so this is an approximation — but a far closer one
+    # than estimates alone, and it never flatters the router.
+    if first_success is not None:
+        baseline_cost = actual_cost(
+            baseline_spec, first_success.input_tokens, first_success.output_tokens
+        )
+    else:
+        baseline_cost = actual_cost(
+            baseline_spec, task.est_input_tokens, task.est_output_tokens
+        )
+    return BrokerResult(
+        final_text=final_text,
+        final_model=final_spec.model_id,
+        verified=bool(last and last.audit_passed),
+        routing_rationale=decision.rationale,
+        attempts=attempts,
+        underqualified=decision.underqualified,
+        warnings=list(decision.warnings),
+        triage=triage_verdict,
+        generation_cost_usd=sum(a.cost_usd for a in attempts),
+        audit_cost_usd=sum(a.audit_cost_usd for a in attempts),
+        baseline_cost_usd=baseline_cost,
+        baseline_model=baseline_spec.model_id,
+    )
+
+
+def _write_trace_event(trace_path: Path | None, event: str, payload: dict) -> None:
+    """Append a named plan event to the same JSONL stream.
+
+    New records carry an "event" key; the existing per-task summary records
+    do not, and are not modified. A reader treats a missing "event" as the
+    legacy task record. Purely additive, so committed traces stay readable.
+    """
+    if not trace_path:
+        return
+    record = {"ts": time.time(), "event": event, **payload}
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with trace_path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _write_trace_record(
+    trace_path: Path | None, task: Task, decision: RoutingDecision, result: BrokerResult
+) -> None:
+    """Append a JSONL trace record — the raw material for offline evals."""
+    if not trace_path:
+        return
+    record = {
+        "ts": time.time(),
+        "task_type": task.task_type,
+        "complexity": task.complexity,
+        # Null unless the caller sent task_type="auto". "source" is the
+        # honesty field: heuristic guess vs a model that was paid to look.
+        "triage_source": result.triage.source if result.triage else None,
+        "triage_confidence": result.triage.confidence if result.triage else None,
+        "policy": decision.policy_name,
+        "chosen_model": decision.chosen.model_id,
+        "final_model": result.final_model,
+        "verified": result.verified,
+        "escalated": result.escalated,
+        "failed_over": result.failed_over,
+        "truncated": result.truncated,
+        "underqualified": result.underqualified,
+        # Top-level so a trace query can ask "what share of our verified
+        # results were signed off by a model from the same lab?"
+        "final_audit_cross_lab": (
+            result.attempts[-1].cross_lab_audit if result.attempts else None
+        ),
+        "gates": list(decision.gates),
+        "warnings": list(result.warnings),
+        "generation_cost_usd": round(result.generation_cost_usd, 8),
+        "audit_cost_usd": round(result.audit_cost_usd, 8),
+        "total_cost_usd": round(result.total_cost_usd, 8),
+        "baseline_model": result.baseline_model,
+        "baseline_cost_usd": round(result.baseline_cost_usd, 8),
+        "savings_vs_baseline_usd": round(result.savings_vs_baseline_usd, 8),
+        "attempts": [asdict(a) for a in result.attempts],
+        "rationale": result.routing_rationale,
+    }
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with trace_path.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
 
 @dataclass
 class StepResult:
@@ -636,14 +803,14 @@ class Broker:
         do not, and are not modified. A reader treats a missing "event" as the
         legacy task record. Purely additive, so committed traces stay readable.
         """
-        if not self.trace_path:
-            return
-        record = {"ts": time.time(), "event": event, **payload}
-        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.trace_path.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+        _write_trace_event(self.trace_path, event, payload)
 
     # -- internals ---------------------------------------------------------
+    #
+    # These delegate to the module-level functions above, which is also what
+    # AsyncBroker calls — see the comment there. Keeping the delegation thin
+    # (just supplying `self.x`) is what makes it a genuine share rather than
+    # a second copy that happens to look the same today.
 
     def _complete(
         self, spec: ModelSpec, task: Task, feedback: list[str] | None = None
@@ -656,22 +823,12 @@ class Broker:
         )
 
     def _provider_synthetic(self, provider_name: str) -> bool:
-        """Whether the named provider is a canned stand-in, not a real vendor.
-
-        Looked up defensively: a provider that failed to resolve tells us
-        nothing about syntheticity, and this must never raise on top of an
-        already-failed attempt.
-        """
-        try:
-            provider = self.providers.get(provider_name)
-        except KeyError:
-            return False
-        return getattr(provider, "synthetic", False)
+        return _is_provider_synthetic(self.providers, provider_name)
 
     def _maybe_audit(
         self, task: Task, output: Completion, spec: ModelSpec
     ) -> AuditVerdict | None:
-        if not self.policy.audit_enabled or len(self.registry) < 2:
+        if not _should_audit(self.policy, self.registry):
             return None
         try:
             return audit(task, output, spec, self.registry, self.providers, self.policy)
@@ -688,41 +845,16 @@ class Broker:
     def _failover_target(
         self, decision: RoutingDecision, tried: set[str]
     ) -> ModelSpec | None:
-        """Next-best model from the same routing decision, not yet attempted."""
-        for scored in decision.ranked:
-            if scored.spec.model_id not in tried:
-                return scored.spec
-        return None
+        return _pick_failover_target(decision, tried)
 
     def _escalation_target(
         self, spec: ModelSpec, task: Task, tried: set[str]
     ) -> ModelSpec | None:
-        """Best model in the next tier up, scored under the same policy.
-
-        Two corrections live here. It was once hardcoded to "reasoning", so a
-        failed coding task escalated to whichever model reasoned best. It then
-        maximised capability for the task type — which quietly ignored the
-        policy, so a cost-first run could fail an audit and jump to the
-        priciest model in the catalog. Moving up a tier is already the quality
-        step; *which* model in that tier is still a cost/quality tradeoff, and
-        the policy is what decides tradeoffs.
-        """
-        tier = _ESCALATION_ORDER.get(spec.tier)
-        while tier is not None:
-            candidates = self.registry.by_tier(tier)
-            untried = [m for m in candidates if m.model_id not in tried]
-            pool = untried or candidates
-            if pool:
-                return score_models(task, pool, self.registry, self.policy)[0].spec
-            tier = _ESCALATION_ORDER.get(tier)
-        return None
+        return _pick_escalation_target(self.registry, self.policy, spec, task, tried)
 
     def _baseline_model(self, task: Task) -> ModelSpec:
         """What "always use the best model" would have meant for this task."""
-        return max(
-            self.registry.all(),
-            key=lambda m: (m.capability_for(task.task_type), TIER_RANK.get(m.tier, 0)),
-        )
+        return _pick_baseline_spec(self.registry, task)
 
     def _finalize(
         self,
@@ -734,71 +866,11 @@ class Broker:
         first_success: Completion | None,
         triage_verdict: Triage | None = None,
     ) -> BrokerResult:
-        last = attempts[-1] if attempts else None
-        baseline_spec = self._baseline_model(task)
-        # Price the baseline on tokens we actually observed where possible;
-        # fall back to the task's estimates when nothing completed. Token
-        # counts differ per model, so this is an approximation — but a far
-        # closer one than estimates alone, and it never flatters the router.
-        if first_success is not None:
-            baseline_cost = actual_cost(
-                baseline_spec, first_success.input_tokens, first_success.output_tokens
-            )
-        else:
-            baseline_cost = actual_cost(
-                baseline_spec, task.est_input_tokens, task.est_output_tokens
-            )
-        return BrokerResult(
-            final_text=final_text,
-            final_model=final_spec.model_id,
-            verified=bool(last and last.audit_passed),
-            routing_rationale=decision.rationale,
-            attempts=attempts,
-            underqualified=decision.underqualified,
-            warnings=list(decision.warnings),
-            triage=triage_verdict,
-            generation_cost_usd=sum(a.cost_usd for a in attempts),
-            audit_cost_usd=sum(a.audit_cost_usd for a in attempts),
-            baseline_cost_usd=baseline_cost,
-            baseline_model=baseline_spec.model_id,
+        return _build_broker_result(
+            self.registry, task, decision, attempts, final_text, final_spec,
+            first_success, triage_verdict,
         )
 
     def _trace(self, task: Task, decision: RoutingDecision, result: BrokerResult) -> None:
         """Append a JSONL trace record — the raw material for offline evals."""
-        if not self.trace_path:
-            return
-        record = {
-            "ts": time.time(),
-            "task_type": task.task_type,
-            "complexity": task.complexity,
-            # Null unless the caller sent task_type="auto". "source" is the
-            # honesty field: heuristic guess vs a model that was paid to look.
-            "triage_source": result.triage.source if result.triage else None,
-            "triage_confidence": result.triage.confidence if result.triage else None,
-            "policy": decision.policy_name,
-            "chosen_model": decision.chosen.model_id,
-            "final_model": result.final_model,
-            "verified": result.verified,
-            "escalated": result.escalated,
-            "failed_over": result.failed_over,
-            "truncated": result.truncated,
-            "underqualified": result.underqualified,
-            # Top-level so a trace query can ask "what share of our verified
-            # results were signed off by a model from the same lab?"
-            "final_audit_cross_lab": (
-                result.attempts[-1].cross_lab_audit if result.attempts else None
-            ),
-            "gates": list(decision.gates),
-            "warnings": list(result.warnings),
-            "generation_cost_usd": round(result.generation_cost_usd, 8),
-            "audit_cost_usd": round(result.audit_cost_usd, 8),
-            "total_cost_usd": round(result.total_cost_usd, 8),
-            "baseline_model": result.baseline_model,
-            "baseline_cost_usd": round(result.baseline_cost_usd, 8),
-            "savings_vs_baseline_usd": round(result.savings_vs_baseline_usd, 8),
-            "attempts": [asdict(a) for a in result.attempts],
-            "rationale": result.routing_rationale,
-        }
-        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.trace_path.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+        _write_trace_record(self.trace_path, task, decision, result)

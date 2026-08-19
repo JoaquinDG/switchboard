@@ -197,10 +197,12 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** optional cache-hit-rate assumptions per task, applied in estimation, clearly labelled as assumptions rather than observations.
 - **Trap:** an assumed cache hit rate is an input, not a measurement. Never let it appear in a "measured cost" field.
 
-### 10. Async provider layer
-- [ ] **Why it matters:** Every call is blocking. A five-step pipeline with independent steps runs strictly serially, and audits serialise behind generation.
+### 10. Async provider layer — **DONE (run() only)**
+- [x] **Why it matters:** Every call is blocking. A five-step pipeline with independent steps runs strictly serially, and audits serialise behind generation.
 - **Done looks like:** `asyncio` variants of Provider and Broker, the existing sync API unchanged and still tested, no new dependencies.
-- **Trap:** do not fork the codebase into two half-maintained paths. Share the routing, auditing, and accounting logic.
+- **Shipped as:** `AsyncProvider`/`AsyncProviderPool` (`providers/base.py`), `AsyncMockProvider` / `AsyncScriptedProvider` / `AsyncFlakyProvider` offline stand-ins, `audit_async` (`auditor.py`), and `AsyncBroker.run()` (`async_broker.py`). Routing (`route`), escalation targeting, failover targeting, baseline pricing, and result/trace construction are the exact same functions `Broker` calls — extracted to module-level in `broker.py` and imported by `async_broker.py`, not reimplemented; only the provider/auditor call sites differ (`await` vs blocking). The sync `Broker` and every existing test are unchanged; 12 new tests in `tests/test_async_broker.py` cover the async run/escalation/failover/audit/trace paths against the same fixtures the sync suite uses.
+- **Trap — avoided the way the item asked:** the routing, auditing and accounting logic is literally shared, not two copies that happen to agree today (see `_build_broker_result`, `_pick_escalation_target`, `_pick_failover_target`, `_should_audit`, `_write_trace_record` in `broker.py`).
+- **Scoped out, and said so rather than half-shipping it:** `AsyncBroker.run_plan()` is not implemented. A plan's actual payoff from async is running independent steps concurrently, which needs a dependency-aware scheduler of its own; bolting that onto `run()` here, still serially, would have been the "half-maintained second path" the trap warns about. Model-based triage (`triage_use_model=True`) is also not offered on `AsyncBroker`, because `classify_with_model` makes a blocking call that needs its own async version first — `AsyncBroker.run()` always uses the offline heuristic for `task_type="auto"`. Both are natural next items, not silently dropped.
 
 ### 11. Measured latency classes
 - [ ] **Why it matters:** `fast` / `medium` / `slow` are assigned by tier and never measured, yet latency is a full third of the `balanced` policy weighting. One of three routing inputs is currently a guess.

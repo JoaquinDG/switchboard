@@ -5,7 +5,8 @@ verify outputs with cross-model audits, escalate when quality fails, reroute
 when a provider falls over, and account for every dollar it took.
 """
 
-from .auditor import AUDIT_PROMPT_TEMPLATE, AuditVerdict, audit, pick_auditor
+from .auditor import AUDIT_PROMPT_TEMPLATE, AuditVerdict, audit, audit_async, pick_auditor
+from .async_broker import AsyncBroker
 from .broker import Attempt, Broker, BrokerResult, PlanResult, StepResult
 from .policies import (
     BALANCED,
@@ -38,6 +39,11 @@ from .replay import (
 )
 from .prompts import AUDIT_PROMPT_HEADER, ESCALATION_RETRY_TEMPLATE, build_retry_prompt
 from .providers.base import (
+    AsyncFlakyProvider,
+    AsyncMockProvider,
+    AsyncProvider,
+    AsyncProviderPool,
+    AsyncScriptedProvider,
     Completion,
     FlakyProvider,
     MockProvider,
@@ -49,6 +55,7 @@ from .providers.base import (
     ProviderTimeout,
     ProviderUnavailable,
     ScriptedProvider,
+    async_mock_pool,
     mock_pool,
 )
 from .providers.http import AnthropicProvider, OpenAICompatibleProvider
@@ -86,6 +93,12 @@ __all__ = [
     "AUDIT_PROMPT_HEADER",
     "AUDIT_PROMPT_TEMPLATE",
     "AnthropicProvider",
+    "AsyncBroker",
+    "AsyncFlakyProvider",
+    "AsyncMockProvider",
+    "AsyncProvider",
+    "AsyncProviderPool",
+    "AsyncScriptedProvider",
     "Attempt",
     "AuditVerdict",
     "BALANCED",
@@ -131,7 +144,9 @@ __all__ = [
     "Triage",
     "UNKNOWN_CAPABILITY_PRIOR",
     "actual_cost",
+    "async_mock_pool",
     "audit",
+    "audit_async",
     "build_provider",
     "build_retry_prompt",
     "classify_heuristic",

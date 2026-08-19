@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 346 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 346 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -533,7 +533,7 @@ Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)*
 - **Batch-API pricing** — a ~50% discount the router cannot currently see.
 - **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
 
-Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
+Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
 
 ## Repo map
 
@@ -549,9 +549,10 @@ src/switchboard/
   router.py          gates -> scoring -> explained decision (+ warnings)
   auditor.py         cross-lab verification, fail-closed, tolerant parsing
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
-  providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
+  async_broker.py    AsyncBroker.run(): same routing/accounting, awaited provider + auditor calls
+  providers/         Provider + AsyncProvider protocols, offline mock/scripted/flaky doubles (sync + async), HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               346 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring, async broker)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,
