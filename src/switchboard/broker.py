@@ -168,6 +168,10 @@ class Attempt:
     output_tokens: int = 0
     cost_usd: float = 0.0
     audit_cost_usd: float = 0.0
+    # Wall-clock time of the generation call, start to return (or to the
+    # raised error). Present even on a failed attempt: a timeout is a latency
+    # observation too, not just an availability one.
+    latency_ms: float = 0.0
     # Set when the provider call itself failed; output_text is empty.
     error: str | None = None
     # True if the producer or the auditor (whichever is relevant) was a canned
@@ -319,6 +323,7 @@ class Broker:
 
         while True:
             tried.add(spec.model_id)
+            call_started = time.perf_counter()
             try:
                 output = self._complete(spec, task, feedback)
             except ProviderError as e:
@@ -331,6 +336,7 @@ class Broker:
                         audit_score=None,
                         role=role,
                         had_audit_feedback=bool(feedback),
+                        latency_ms=(time.perf_counter() - call_started) * 1000,
                         error=str(e),
                         synthetic=self._provider_synthetic(spec.provider),
                     )
@@ -356,6 +362,7 @@ class Broker:
                 spec, role = fallback, "failover"
                 continue
 
+            generation_latency_ms = (time.perf_counter() - call_started) * 1000
             if first_success is None:
                 first_success = output
 
@@ -376,6 +383,7 @@ class Broker:
                     truncated=output.truncated,
                     input_tokens=output.input_tokens,
                     output_tokens=output.output_tokens,
+                    latency_ms=generation_latency_ms,
                     cost_usd=actual_cost(spec, output.input_tokens, output.output_tokens),
                     audit_cost_usd=0.0 if verdict is None else verdict.cost_usd,
                     synthetic=self._provider_synthetic(spec.provider)

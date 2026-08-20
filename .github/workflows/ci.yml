@@ -51,6 +51,11 @@ jobs:
       - name: Catalog feedback refuses synthetic traces
         run: PYTHONPATH=src python evals/catalog_feedback.py
 
+      # Same rule, for wall-clock latency: MockProvider returns in
+      # microseconds, which must never be reported as a measured p50/p95.
+      - name: Latency report refuses synthetic traces
+        run: PYTHONPATH=src python evals/latency_report.py
+
       - name: Examples run offline
         run: |
           PYTHONPATH=src python examples/quickstart.py
