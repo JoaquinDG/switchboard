@@ -72,10 +72,13 @@ from .triage import (
     triage_task,
 )
 from .router import (
+    ComponentMargin,
+    Counterfactual,
     RoutingDecision,
     ScoredModel,
     actual_cost,
     estimate_cost,
+    explain_not_chosen,
     route,
     score_models,
 )
@@ -95,6 +98,8 @@ __all__ = [
     "COST_FIRST",
     "CatalogStaleWarning",
     "Completion",
+    "ComponentMargin",
+    "Counterfactual",
     "ESCALATION_RETRY_TEMPLATE",
     "FlakyProvider",
     "ModelSpec",
@@ -138,6 +143,7 @@ __all__ = [
     "classify_with_model",
     "demo_registry",
     "estimate_cost",
+    "explain_not_chosen",
     "key_status",
     "live_pool",
     "mock_pool",

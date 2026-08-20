@@ -216,10 +216,21 @@ These are the highest-value items because each one fixes something the repo curr
 
 ## Tier 4 — explainability polish
 
-### 13. Counterfactual "why not X?" explainer
-- [ ] **Why it matters:** The rationale explains why the winner won. The question people actually ask is why their preferred model lost, and the ranked list holds every number needed to answer it.
+### 13. Counterfactual "why not X?" explainer — **DONE**
+- [x] Shipped as `router.explain_not_chosen(decision, model_id, policy)`,
+  returning a `Counterfactual` with a per-axis `ComponentMargin` breakdown and
+  a rationale string ("lost on quality: 0.10 vs 0.90, worth 0.40; led on cost:
+  1.00 vs 0.00, worth 0.30 its way"). The weighted margins sum to the score gap
+  by construction, so the attribution cannot drift from the decision.
+- **Why it matters:** The rationale explains why the winner won. The question people actually ask is why their preferred model lost, and the ranked list holds every number needed to answer it.
 - **Done looks like:** a function taking a decision and a model id, returning the specific losing margin by component — "lost on cost: 0.31 vs 0.88, worth 0.17 under this policy".
 - **Trap:** compute it from the existing ranked list. Do not re-run routing.
+- **How the trap was handled:** the function reads only `decision.ranked` and
+  the policy weights — no registry, no `route()` call. A model a gate removed
+  before scoring is absent from the ranked list, so it is reported
+  `scored=False` with no invented margin rather than a fabricated comparison,
+  and a policy whose name does not match the one that produced the decision is
+  refused (its weights never applied to this ranking).
 
 ### 14. Close the triage held-out gap
 - [ ] **Why it matters:** Triage scores 100% on its tuned set and 60% held out. The gap is honestly reported, but 60% is still the real number.
