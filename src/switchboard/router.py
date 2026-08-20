@@ -166,6 +166,156 @@ def score_models(
     return scored
 
 
+@dataclass(frozen=True)
+class ComponentMargin:
+    """One axis of a counterfactual: where the winner and a rival stood on a
+    single scoring component, and what the gap was worth once the policy's
+    weight was applied.
+
+    ``weighted_margin`` is ``weight * (chosen_component - other_component)``:
+    positive means the winner led on this axis and the rival lost ground here;
+    negative means the rival was actually the *better* option on this axis and
+    its overall deficit came from elsewhere. Keeping the sign is the point —
+    "you lost on cost but were ahead on quality" is the honest answer, and
+    collapsing it to an absolute gap would hide half of it.
+    """
+
+    component: str  # "quality" | "cost" | "latency"
+    weight: float
+    chosen_component: float
+    other_component: float
+    weighted_margin: float
+
+
+@dataclass(frozen=True)
+class Counterfactual:
+    """Why a specific model did not win a routing decision.
+
+    Reconstructed entirely from the decision's existing ranked list — no
+    re-routing — so it costs nothing and cannot silently disagree with the
+    decision it explains. The per-axis ``weighted_margin`` values sum to
+    ``total_margin`` by construction, because the score they came from is
+    exactly their weighted sum.
+    """
+
+    model_id: str
+    chosen_id: str
+    # False when the model is absent from the ranked list: a gate filtered it
+    # before scoring, or it is not in this catalog. A gated model has no
+    # component breakdown, so answering "it scored low" would be a lie.
+    scored: bool
+    is_winner: bool
+    total_margin: float  # chosen.score - other.score; 0.0 if this model won
+    components: list[ComponentMargin]
+    rationale: str
+
+
+def explain_not_chosen(
+    decision: RoutingDecision, model_id: str, policy: Policy
+) -> Counterfactual:
+    """Answer "why not this model?" from a decision already made.
+
+    The rationale on a ``RoutingDecision`` argues why the winner won. The
+    question people actually ask is why *their* preferred model lost, and the
+    ranked list already holds every number needed to answer it: each
+    ``ScoredModel`` keeps its normalized components, so the losing margin can
+    be attributed axis by axis without re-running the router (ROADMAP item 13).
+
+    ``policy`` supplies the weights the components were combined under. It must
+    be the policy that produced ``decision`` — a different one would attribute
+    the gap using weights that never applied, so a name mismatch is refused
+    rather than silently producing a plausible-looking wrong answer.
+
+    A model that a gate removed before scoring is reported with
+    ``scored=False`` and no component breakdown: it never earned a score to
+    lose by, and pretending otherwise would invent a comparison that did not
+    happen.
+    """
+    if policy.name != decision.policy_name:
+        raise ValueError(
+            f"policy {policy.name!r} did not produce this decision "
+            f"(policy_name={decision.policy_name!r}); the weighted margins would "
+            f"be computed under weights that never applied to this ranking"
+        )
+
+    chosen = decision.ranked[0]
+    chosen_id = chosen.spec.model_id
+    target = next(
+        (s for s in decision.ranked if s.spec.model_id == model_id), None
+    )
+
+    if target is None:
+        if decision.gates:
+            note = (
+                f"{model_id} is not among the {len(decision.ranked)} scored "
+                f"candidate(s): a gate removed it before scoring, or it is not in "
+                f"this catalog (gates fired: {', '.join(decision.gates)})"
+            )
+        else:
+            note = (
+                f"{model_id} is not in this catalog: no gate fired, so every "
+                f"catalog model was scored and would appear in the ranked list"
+            )
+        return Counterfactual(
+            model_id=model_id,
+            chosen_id=chosen_id,
+            scored=False,
+            is_winner=False,
+            total_margin=0.0,
+            components=[],
+            rationale=note,
+        )
+
+    if model_id == chosen_id:
+        return Counterfactual(
+            model_id=model_id,
+            chosen_id=chosen_id,
+            scored=True,
+            is_winner=True,
+            total_margin=0.0,
+            components=[],
+            rationale=f"{model_id} was the chosen model under {policy.name}",
+        )
+
+    axes = (
+        ("quality", policy.quality_weight, chosen.quality_component, target.quality_component),
+        ("cost", policy.cost_weight, chosen.cost_component, target.cost_component),
+        ("latency", policy.latency_weight, chosen.latency_component, target.latency_component),
+    )
+    components = [
+        ComponentMargin(name, weight, chosen_c, other_c, weight * (chosen_c - other_c))
+        for name, weight, chosen_c, other_c in axes
+    ]
+    # Biggest source of the deficit first, so the rationale leads with the axis
+    # that actually cost this model the decision.
+    components.sort(key=lambda c: c.weighted_margin, reverse=True)
+    total_margin = chosen.score - target.score
+
+    phrases = []
+    for c in components:
+        pair = f"{c.other_component:.2f} vs {c.chosen_component:.2f}"
+        if c.weighted_margin > 1e-9:
+            phrases.append(f"lost on {c.component}: {pair}, worth {c.weighted_margin:.2f}")
+        elif c.weighted_margin < -1e-9:
+            phrases.append(f"led on {c.component}: {pair}, worth {-c.weighted_margin:.2f} its way")
+        else:
+            phrases.append(f"tied on {c.component}: {pair}")
+    rationale = (
+        f"{model_id} lost to {chosen_id} under {policy.name} by "
+        f"{total_margin:.3f}: " + "; ".join(phrases)
+    )
+
+    return Counterfactual(
+        model_id=model_id,
+        chosen_id=chosen_id,
+        scored=True,
+        is_winner=False,
+        total_margin=total_margin,
+        components=components,
+        rationale=rationale,
+    )
+
+
 def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
     """Rank all eligible models and return an explained decision."""
     candidates = registry.all()
