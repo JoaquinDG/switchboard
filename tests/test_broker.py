@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -43,6 +44,27 @@ class BareProvider:
 
     def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
         return Completion(text=self._text, model_id=model_id, input_tokens=10, output_tokens=10)
+
+
+class SlowProvider:
+    """A Provider double that takes a known amount of wall-clock time.
+
+    MockProvider returns instantly, which cannot tell a genuine latency
+    measurement from a stopwatch that was never started. This sleeps a fixed,
+    small duration so a test can assert the recorded `latency_ms` is at least
+    that long.
+    """
+
+    name = "mock"
+    synthetic = True
+
+    def __init__(self, delay_s: float = 0.05) -> None:
+        self._delay_s = delay_s
+
+    def complete(self, model_id: str, prompt: str, max_tokens: int = 1024) -> Completion:
+        time.sleep(self._delay_s)
+        return Completion(text=f"[{model_id}] slow reply", model_id=model_id,
+                           input_tokens=10, output_tokens=10)
 
 
 def two_provider_registry() -> Registry:
@@ -416,6 +438,44 @@ class CostAccountingTests(unittest.TestCase):
         self.assertLess(thrifty.audit_cost_usd, expensive.audit_cost_usd)
 
 
+class LatencyTests(unittest.TestCase):
+    """`ModelSpec.latency` (fast/medium/slow) is an assigned class, never
+    measured. These test the raw wall-clock timing the router needs before
+    that class can be checked against anything real."""
+
+    def test_latency_is_recorded_on_a_successful_attempt(self):
+        result = make_broker().run(Task(prompt="summarize this", task_type="summarization"))
+        self.assertTrue(result.attempts)
+        for attempt in result.attempts:
+            self.assertGreaterEqual(attempt.latency_ms, 0.0)
+
+    def test_latency_is_recorded_on_a_provider_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.jsonl"
+            broker = Broker(
+                demo_registry(),
+                ProviderPool([ScriptedProvider({}, default=ProviderUnavailable("down"))]),
+                Policy("no_failover", 0.3, 0.6, 0.1, max_provider_failovers=0),
+                trace_path=trace,
+            )
+            with self.assertRaises(Exception):
+                broker.run(Task(prompt="hello", task_type="reasoning"))
+            record = json.loads(trace.read_text().strip())
+            self.assertEqual(len(record["attempts"]), 1)
+            self.assertIsNotNone(record["attempts"][0]["error"])
+            self.assertGreaterEqual(record["attempts"][0]["latency_ms"], 0.0)
+
+    def test_latency_reflects_a_genuinely_slow_provider(self):
+        broker = Broker(
+            demo_registry(), ProviderPool([SlowProvider(delay_s=0.05)]), BALANCED
+        )
+        result = broker.run(Task(prompt="summarize this", task_type="summarization"))
+        # The generation attempt slept 50ms; the audit call did not, since it
+        # goes through the same instant SlowProvider mock — but at least one
+        # attempt must reflect the sleep.
+        self.assertTrue(any(a.latency_ms >= 40.0 for a in result.attempts))
+
+
 class RoutingFlagTests(unittest.TestCase):
     def test_underqualified_routing_is_surfaced_on_the_result(self):
         result = make_broker().run(
@@ -474,6 +534,7 @@ class TracingTests(unittest.TestCase):
             for attempt in record["attempts"]:
                 self.assertIn("cost_usd", attempt)
                 self.assertIn("role", attempt)
+                self.assertIn("latency_ms", attempt)
 
 
 if __name__ == "__main__":
