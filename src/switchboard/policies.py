@@ -25,6 +25,17 @@ class NoQualifiedModelError(RuntimeError):
     """Raised when nothing qualifies and the policy says to fail loudly."""
 
 
+class UnsupportedFeatureError(RuntimeError):
+    """Raised when no model in the registry supports a task's required features.
+
+    Same shape as `ContextWindowExceededError` would be: a required feature —
+    JSON mode, tool use, vision — is a fact about what a model's API can do,
+    not a quality judgment. There is no honest "next tier up" to degrade to,
+    because tier tracks capability, not feature support, so this always
+    raises rather than guessing.
+    """
+
+
 @dataclass(frozen=True)
 class Task:
     """A unit of work to route."""
@@ -35,6 +46,10 @@ class Task:
     est_input_tokens: int = 1_000
     est_output_tokens: int = 500
     needs_fast_response: bool = False
+    # Feature flags this task requires, e.g. {"json_mode", "vision"}. A hard
+    # gate in the router: a model missing a required feature is ineligible
+    # regardless of cost or capability score (ROADMAP item 12).
+    required_features: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.complexity <= 1.0:
@@ -47,6 +62,13 @@ class Task:
         ):
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be a non-negative int, got {value!r}")
+        if not isinstance(self.required_features, frozenset):
+            object.__setattr__(self, "required_features", frozenset(self.required_features))
+        for feature in self.required_features:
+            if not isinstance(feature, str) or not feature:
+                raise ValueError(
+                    f"required_features must be non-empty strings, got {feature!r}"
+                )
 
 
 @dataclass(frozen=True)

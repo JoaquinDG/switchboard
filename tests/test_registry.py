@@ -66,6 +66,25 @@ class ModelSpecValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.spec(model_id="")
 
+    def test_features_default_to_empty(self):
+        self.assertEqual(self.spec().features, frozenset())
+
+    def test_features_accepts_a_list_and_stores_a_frozenset(self):
+        # JSON has no set type, so the loader hands this a list.
+        spec = self.spec(features=["vision", "json_mode"])
+        self.assertEqual(spec.features, frozenset({"vision", "json_mode"}))
+
+    def test_empty_feature_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(features=["vision", ""])
+
+    def test_supports_requires_every_feature(self):
+        spec = self.spec(features={"vision", "json_mode"})
+        self.assertTrue(spec.supports({"vision"}))
+        self.assertTrue(spec.supports({"vision", "json_mode"}))
+        self.assertFalse(spec.supports({"vision", "tool_use"}))
+        self.assertTrue(spec.supports(set()))
+
 
 class RegistryTests(unittest.TestCase):
     def test_duplicate_model_id_rejected(self):
@@ -137,6 +156,10 @@ class FromJSONTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.load({"models": [{**VALID, "capabilities": {"coding": 8.0}}]})
         self.assertIn("m1", str(ctx.exception))
+
+    def test_features_load_as_a_list_and_become_a_frozenset(self):
+        registry = self.load({"models": [{**VALID, "features": ["json_mode", "vision"]}]})
+        self.assertEqual(registry.get("m1").features, frozenset({"json_mode", "vision"}))
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from .policies import Policy, Task
 from .prompts import build_retry_prompt
 from .providers.base import Completion, ProviderConfigError, ProviderError, ProviderPool
 from .registry import TIER_RANK, ModelSpec, Registry
-from .router import RoutingDecision, actual_cost, route, score_models
+from .router import RoutingDecision, actual_cost, fits_features, route, score_models
 from .planner import (
     Plan,
     plan_request,
@@ -699,17 +699,20 @@ class Broker:
     ) -> ModelSpec | None:
         """Best model in the next tier up, scored under the same policy.
 
-        Two corrections live here. It was once hardcoded to "reasoning", so a
-        failed coding task escalated to whichever model reasoned best. It then
-        maximised capability for the task type — which quietly ignored the
-        policy, so a cost-first run could fail an audit and jump to the
-        priciest model in the catalog. Moving up a tier is already the quality
-        step; *which* model in that tier is still a cost/quality tradeoff, and
-        the policy is what decides tradeoffs.
+        Three corrections live here. It was once hardcoded to "reasoning", so
+        a failed coding task escalated to whichever model reasoned best. It
+        then maximised capability for the task type — which quietly ignored
+        the policy, so a cost-first run could fail an audit and jump to the
+        priciest model in the catalog. Moving up a tier is already the
+        quality step; *which* model in that tier is still a cost/quality
+        tradeoff, and the policy is what decides tradeoffs. Third: a tier can
+        contain models that lack a feature the task requires — escalating to
+        one would trade an audit failure for a hard provider error, so the
+        feature gate applies here exactly as it does in `route()`.
         """
         tier = _ESCALATION_ORDER.get(spec.tier)
         while tier is not None:
-            candidates = self.registry.by_tier(tier)
+            candidates = [m for m in self.registry.by_tier(tier) if fits_features(task, m)]
             untried = [m for m in candidates if m.model_id not in tried]
             pool = untried or candidates
             if pool:

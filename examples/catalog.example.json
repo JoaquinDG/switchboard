@@ -16,7 +16,8 @@
         "extraction": 0.88,
         "creative": 0.9,
         "audit": 0.95
-      }
+      },
+      "features": ["json_mode", "tool_use", "vision"]
     },
     {
       "model_id": "your-fast-cheap-model-id",
