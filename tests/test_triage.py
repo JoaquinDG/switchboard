@@ -7,9 +7,15 @@ a result never claims a model classified it when the heuristic did.
 """
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+_EVALS_DIR = str(Path(__file__).resolve().parent.parent / "evals")
+if _EVALS_DIR not in sys.path:
+    sys.path.insert(0, _EVALS_DIR)
+from triage_eval import HELD_OUT  # noqa: E402
 
 from switchboard import (
     BALANCED,
@@ -119,6 +125,38 @@ class HeuristicTests(unittest.TestCase):
             classify_heuristic("Have a look at this:\n```\ndef f(x):\n  return x\n```").task_type,
             "coding",
         )
+
+
+class ConfidenceGateReachTests(unittest.TestCase):
+    """ROADMAP 14: the held-out gap (evals/triage_eval.py) must not be closed
+    by tuning the keyword table against HELD_OUT — that comment is explicit
+    and the trap is real. What can be guaranteed honestly is structural: every
+    prompt the heuristic gets wrong on that set scores below the confidence
+    gate's default threshold, so `Broker(triage_use_model=True)` hands each
+    one to a model instead of silently trusting a wrong guess.
+
+    This is a regression guard, not a rescue proof — it says nothing about
+    whether the model then answers correctly. That was measured separately,
+    live (examples/triage_ab.py, cited in the README). If this test starts
+    failing, the confidence scoring changed in a way that quietly widens the
+    held-out gap the README's recommendation relies on, and the README claim
+    needs re-checking before anything else lands.
+    """
+
+    def test_held_out_failures_score_below_the_default_gate_threshold(self):
+        threshold = BALANCED.triage_confidence_threshold
+        failures = [
+            (prompt, expected)
+            for prompt, expected in HELD_OUT
+            if classify_heuristic(prompt).task_type != expected
+        ]
+        # If the heuristic ever gets held-out perfectly right, there is
+        # nothing left to guard here — but today it does not, and a silent
+        # drop to zero failures would itself be worth noticing.
+        self.assertTrue(failures, "expected at least one held-out failure to guard")
+        for prompt, expected in failures:
+            with self.subTest(prompt=prompt, expected=expected):
+                self.assertLess(classify_heuristic(prompt).confidence, threshold)
 
 
 class ModelTriageTests(unittest.TestCase):
