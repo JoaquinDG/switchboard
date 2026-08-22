@@ -124,6 +124,15 @@ class Policy:
     # provider call fails outright (outage, rate limit, timeout). Distinct
     # from escalation, which is about quality, not availability.
     max_provider_failovers: int = 2
+    # How many times a failed AUDIT call may be retried on a different
+    # qualified auditor before failing closed. Auditor selection concentrates
+    # traffic — measured live 2026-08-21, "cheapest_qualified" put 38 of 60
+    # audits on one model, and that model's provider spent the day returning
+    # 503s, so 23% of the run's audits established nothing. One vendor's bad
+    # afternoon should not disable verification when the catalog holds other
+    # qualified independent auditors. Failing closed is still the end state
+    # when the budget is exhausted: an audit that cannot run has not passed.
+    max_auditor_failovers: int = 1
 
     def __post_init__(self) -> None:
         total = self.quality_weight + self.cost_weight + self.latency_weight
@@ -159,6 +168,7 @@ class Policy:
         for label, value in (
             ("max_escalations", self.max_escalations),
             ("max_provider_failovers", self.max_provider_failovers),
+            ("max_auditor_failovers", self.max_auditor_failovers),
         ):
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be a non-negative int, got {value!r}")

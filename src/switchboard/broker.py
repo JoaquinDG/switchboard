@@ -671,19 +671,78 @@ class Broker:
     def _maybe_audit(
         self, task: Task, output: Completion, spec: ModelSpec
     ) -> AuditVerdict | None:
+        """Audit the output, failing over to another auditor on an outage.
+
+        Auditor selection concentrates traffic (measured live: with
+        `cheapest_qualified`, one model graded 38 of 60 tasks — and its
+        provider was the one having the bad day). One vendor's outage should
+        not disable verification while the catalog holds other qualified
+        independent auditors, so a failed audit *call* retries on a different
+        auditor, up to `policy.max_auditor_failovers` times. Distinct from
+        escalation (about the output's quality) and from provider failover
+        (about the producer): this is about the grader's availability.
+
+        The end state is unchanged: when the budget is exhausted, or no
+        auditor is left to try, the audit fails closed — an audit that could
+        not run has not passed.
+        """
         if not self.policy.audit_enabled or len(self.registry) < 2:
             return None
-        try:
-            return audit(task, output, spec, self.registry, self.providers, self.policy)
-        except ProviderError as e:
-            # An audit we could not run is an audit that did not pass. Treating
-            # an auditor outage as a pass would make verification evaporate
-            # exactly when the platform is least healthy.
-            return AuditVerdict(
-                passed=False,
-                score=0.0,
-                issues=[f"auditor unavailable ({e}); failing closed"],
-            )
+        exclude: set[str] = set()
+        outages: list[str] = []
+        while True:
+            try:
+                verdict = audit(
+                    task, output, spec, self.registry, self.providers, self.policy,
+                    exclude=exclude,
+                )
+            except ProviderError as e:
+                failed_model = e.model_id or ""
+                outages.append(f"{failed_model or e.provider or 'auditor'}: {e}")
+                can_fail_over = (
+                    # A missing key or bad credentials is a deployment bug —
+                    # same rule as producer failover: routing around it would
+                    # hide the misconfiguration, here behind a quieter bill.
+                    not isinstance(e, ProviderConfigError)
+                    and bool(failed_model)  # cannot exclude an auditor we cannot name
+                    and len(exclude) < self.policy.max_auditor_failovers
+                )
+                if not can_fail_over:
+                    # An audit we could not run is an audit that did not pass.
+                    # Treating an auditor outage as a pass would make
+                    # verification evaporate exactly when the platform is
+                    # least healthy.
+                    return AuditVerdict(
+                        passed=False,
+                        score=0.0,
+                        issues=[
+                            f"auditor unavailable after {len(outages)} attempt(s) "
+                            f"({'; '.join(outages)}); failing closed"
+                        ],
+                    )
+                exclude.add(failed_model)
+                continue
+            except ValueError as e:
+                # pick_auditor ran out of candidates mid-failover.
+                return AuditVerdict(
+                    passed=False,
+                    score=0.0,
+                    issues=[f"auditor unavailable ({e}); failing closed"],
+                )
+            if outages:
+                # The verdict stands, and the trace says how it was obtained:
+                # a reader is entitled to know this grader was the second
+                # choice, and which outage made it so.
+                verdict = replace(
+                    verdict,
+                    issues=[
+                        "auditor failover: "
+                        + "; ".join(outages)
+                        + f"; audited by {verdict.auditor_model} instead"
+                    ]
+                    + list(verdict.issues),
+                )
+            return verdict
 
     def _failover_target(
         self, decision: RoutingDecision, tried: set[str]
