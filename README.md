@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 335 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 335 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -415,6 +415,8 @@ The tuned set was written alongside the keyword table by the same person, so 100
 
 Every held-out failure collapsed to `reasoning`, the conservative default — the heuristic needs a canonical verb ("summarize", "refactor", "extract"), and ordinary rephrasings like *"Cut this 800-word intro down to 200 words"* or *"Turn this changelog into a release note"* match nothing and fall through. That failure mode over-routes to expensive models rather than under-routing to cheap ones, which is the right direction to be wrong in, and it is the clearest argument for the model-based layer. One held-out pass was luck: *"Which of these two onboarding flows would you ship, and why?"* matched nothing and defaulted to `reasoning`, which happened to be correct — the printed confidence of `0.00` is what gives that away.
 
+**Recommendation: enable `triage_use_model=True` if you cannot tolerate the gap.** Every current held-out failure scores confidence `0.00`, which is below the default `triage_confidence_threshold` (0.25) — `evals/triage_eval.py` checks this offline on every run, and `tests/test_triage.py::ConfidenceGateReachTests` regression-guards it. That means the confidence gate is structurally guaranteed to hand each of today's held-out failures to a model instead of silently trusting a wrong guess. It is not a proof the model then answers correctly — that was measured live, above, at 90% held-out accuracy for $0.00011 across 5 model calls. The keyword table itself is untouched: closing this gap by adding keywords tuned to the held-out prompts would have made the number decorative instead of honest, which is exactly what the comment above `HELD_OUT` in `evals/triage_eval.py` warns against.
+
 ## Design decisions & tradeoffs
 
 **Heuristic scoring, not learned routing.** A learned router would eventually beat hand-set weights, but it's a black box from day one and needs volume you don't have at the start. Explicit weights + decision traces get you explainability now and the training data for a learned router later. The JSONL traces are that dataset — and they carry cost, audit outcomes, and which triage layer fired, which is what makes them trainable rather than merely readable.
@@ -551,7 +553,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               335 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,

@@ -221,10 +221,12 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** a function taking a decision and a model id, returning the specific losing margin by component — "lost on cost: 0.31 vs 0.88, worth 0.17 under this policy".
 - **Trap:** compute it from the existing ranked list. Do not re-run routing.
 
-### 14. Close the triage held-out gap
-- [ ] **Why it matters:** Triage scores 100% on its tuned set and 60% held out. The gap is honestly reported, but 60% is still the real number.
+### 14. Close the triage held-out gap — **DONE**
+- [x] **Why it matters:** Triage scores 100% on its tuned set and 60% held out. The gap is honestly reported, but 60% is still the real number.
 - **Done looks like:** a genuine generalisation improvement, *or* a measured recommendation to default to the model-based layer, backed by accuracy and cost numbers.
 - **Trap:** **do not add keywords that make the held-out prompts pass.** There is a comment in `evals/triage_eval.py` saying exactly this. Tuning against the held-out set destroys the only honest measurement in the repository and converts a real result into a decorative one. If the set ever becomes tuned, it must be relabelled as tuned.
+- **Shipped as:** the recommendation, not a heuristic change — the keyword table is untouched. `evals/triage_eval.py` now reports, offline, that every current held-out failure scores below `Policy.triage_confidence_threshold` (0.25), so `Broker(triage_use_model=True)` is structurally guaranteed to hand each one to a model instead of silently trusting a wrong guess. `tests/test_triage.py::ConfidenceGateReachTests` turns that into a regression guard: if a future change to the confidence calculation ever lets a held-out failure slip past the gate, the test fails before the README's recommendation goes stale.
+- **What this is not:** a rescue proof. Whether the model then answers correctly was measured separately and live, in `examples/triage_ab.py`, and is cited rather than re-run here — this environment has no provider keys, and re-running it would be presenting an old number as fresh. The existing live measurement (held-out accuracy 60% -> 90% at $0.00011 for 5 model calls) is what backs the recommendation; this change makes the gate's *reach* over the failing set a checked fact instead of a one-time observation.
 
 ---
 

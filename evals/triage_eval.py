@@ -18,7 +18,7 @@ from __future__ import annotations
 import sys
 from collections import Counter
 
-from switchboard import classify_heuristic
+from switchboard import BALANCED, classify_heuristic
 
 # Accuracy below this fails the run. Set at 0.80 because triage is a routing
 # *hint*: the qualification gate and the cross-model audit both sit downstream
@@ -156,6 +156,26 @@ def run() -> int:
     repeats = {classify_heuristic(LABELED[0][0]).task_type for _ in range(5)}
     deterministic = len(repeats) == 1
     print(f"\ndeterministic across repeated calls: {deterministic}")
+
+    # ROADMAP 14: the held-out gap is real and the keyword table must not be
+    # tuned against these prompts (see the comment above HELD_OUT). What can
+    # be checked honestly, offline, is whether the already-shipped confidence
+    # gate (ROADMAP 5) would even see these failures — i.e. whether
+    # Broker(triage_use_model=True) hands them to a model instead of trusting
+    # a wrong heuristic guess. This is a structural fact, not a rescue: it
+    # says nothing about whether the model then answers correctly. That part
+    # was measured live, separately, and is not re-run here.
+    threshold = BALANCED.triage_confidence_threshold
+    held_failures = [(p, e) for p, e in HELD_OUT if classify_heuristic(p).task_type != e]
+    in_reach = [p for p, _ in held_failures if classify_heuristic(p).confidence < threshold]
+    print("\nconfidence-gate reach on held-out failures (structural, offline):")
+    print(f"  {len(in_reach)}/{len(held_failures)} of the failures above score below the "
+          f"default triage_confidence_threshold ({threshold}), so Broker(triage_use_model=True) "
+          f"routes every one of them to a model instead of trusting the wrong heuristic guess.")
+    print("  Whether the model then gets them right is a live-API question, last measured "
+          "against real APIs (examples/triage_ab.py, cited in the README): held-out accuracy "
+          "60% -> 90% at $0.00011 for 5 model calls across the 40-prompt set. Re-run "
+          "examples/triage_ab.py to refresh those numbers; this script has no provider keys.")
 
     failed = accuracy < PASS_THRESHOLD or band_failures or not deterministic
     print(f"\n{'FAIL' if failed else 'PASS'}: triage evals")
