@@ -59,7 +59,11 @@ class AuditVerdict:
 
 
 def pick_auditor(
-    registry: Registry, producer: ModelSpec, policy: Policy | None = None
+    registry: Registry,
+    producer: ModelSpec,
+    policy: Policy | None = None,
+    *,
+    exclude: frozenset[str] | set[str] = frozenset(),
 ) -> ModelSpec:
     """Audit-capable model that is not the producer.
 
@@ -76,10 +80,23 @@ def pick_auditor(
     because on a cheap task the audit can otherwise cost more than the work it
     grades. Both run *within* the cross-lab pool: independence is worth more
     than either capability or price.
+
+    `exclude` removes auditors that already failed on this output, so the
+    broker's auditor-failover loop moves to a different grader instead of
+    retrying into the same outage. Exclusion runs before the cross-lab filter:
+    the next choice keeps its independence preference among whoever is left.
     """
-    candidates = [m for m in registry.all() if m.model_id != producer.model_id]
+    candidates = [
+        m
+        for m in registry.all()
+        if m.model_id != producer.model_id and m.model_id not in exclude
+    ]
     if not candidates:
-        raise ValueError("need at least two models in the registry to audit")
+        raise ValueError(
+            "need at least two models in the registry to audit"
+            if not exclude
+            else f"no auditors left after excluding {sorted(exclude)}"
+        )
 
     if policy is None or policy.prefer_cross_lab_auditor:
         cross_lab = [m for m in candidates if m.provider != producer.provider]
@@ -196,9 +213,16 @@ def audit(
     registry: Registry,
     providers: ProviderPool,
     policy: Policy,
+    *,
+    exclude: frozenset[str] | set[str] = frozenset(),
 ) -> AuditVerdict:
-    """Have a different model grade the producer's output."""
-    auditor_spec = pick_auditor(registry, producer, policy)
+    """Have a different model grade the producer's output.
+
+    `exclude` names auditor models that already failed on this output; the
+    broker's failover loop grows it between attempts (see
+    `Broker._maybe_audit`).
+    """
+    auditor_spec = pick_auditor(registry, producer, policy, exclude=exclude)
     provider = providers.get(auditor_spec.provider)
     prompt = AUDIT_PROMPT_TEMPLATE.format(
         task_type=task.task_type,
