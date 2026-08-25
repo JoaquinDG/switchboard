@@ -229,7 +229,8 @@ def run() -> int:
     failed = rate > MAX_FALSE_SPLIT_RATE or coverage < MIN_SPLIT_COVERAGE or not stable
     print("\n" + "=" * 100)
     print(f"{'FAIL' if failed else 'PASS'}: planner evals "
-          f"({len(ALL_CASES)} cases: {len(COMPOUND)} compound, {len(NOT_COMPOUND)} not)")
+          f"({len(ALL_CASES)} cases: {len(COMPOUND)} compound, "
+          f"{len(COMPOUND_UNMARKED)} unmarked compound, {len(NOT_COMPOUND)} not)")
     return 1 if failed else 0
 
 
