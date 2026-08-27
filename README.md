@@ -72,13 +72,13 @@ result.verified          # True only if every step passed its own audit
 
 ## What it looks like
 
-A five-step agentic pipeline dispatched through the **starter catalog** — 12 real models across 4 providers, at prices read from the vendors' own pages:
+A five-step agentic pipeline dispatched through the **starter catalog** — 16 real models across 5 providers, at prices read from the vendors' own pages:
 
 ```
 $ PYTHONPATH=src python3 examples/agentic_workflow.py --catalog examples/starter_catalog.json
 
 === Agentic workflow dispatch ===
-catalog: examples/starter_catalog.json (12 models, prices verified 2026-08-15, 0 days ago)
+catalog: examples/starter_catalog.json (16 models, prices verified 2026-08-15, 12 days ago)
 policy:  balanced
 costs:   estimated at each step's declared token volumes, at real catalog prices
          (execution is mocked — routing is real, output quality is not)
@@ -87,19 +87,19 @@ costs:   estimated at each step's declared token volumes, at real catalog prices
    -> dispatched to claude-opus-5 (frontier, anthropic), est. $0.0475
    -> audited by gpt-5.6-sol (cross-lab)
    -> verified: True
-   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95, cost=$0.0475 (score 0.14), latency=slow
+   -> why: policy=balanced; task_type=reasoning; complexity=0.85 (frontier gate applied) (qualification filter applied); chose claude-opus-5: quality=0.95 (score 0.90), cost=$0.0475 (score 0.14), latency=slow
 
 ==============================================================================
 DISPATCH PLAN SUMMARY
-  [OK ] 1. Research: pull competitor pricing from 5 saved pages  gemini-2.5-flash-lite      $0.0013
-  [OK ] 2. Synthesize: summarize findings into a comparison brief gemini-2.5-flash-lite      $0.0006
+  [OK ] 1. Research: pull competitor pricing from 5 saved pages  deepseek-v4-flash          $0.0015
+  [OK ] 2. Synthesize: summarize findings into a comparison brief deepseek-v4-flash          $0.0006
   [OK ] 3. Strategize: recommend our pricing response            claude-opus-5              $0.0475
   [OK ] 4. Write: draft the new pricing page copy                gemini-3.7-flash           $0.0049
   [OK ] 5. Integrate: generate the webhook code to update the website deepseek-v4-pro            $0.0018
 ------------------------------------------------------------------------------
-  Routed pipeline, estimated:       $0.0561
+  Routed pipeline, estimated:       $0.0563
   Best-model-every-step, estimated: $0.2564
-  Estimated saving from routing:    $0.2003  (78%)
+  Estimated saving from routing:    $0.2001  (78%)
 ```
 
 The same pipeline on the synthetic demo catalog (`--catalog` omitted) routes to `atlas-small / atlas-small / atlas-frontier / atlas-mid / atlas-mid` for an estimated 69% saving.
@@ -562,7 +562,7 @@ CITATION.cff         machine-readable citation; drives GitHub's "Cite this repos
 ## Changelog
 
 **0.3.0**
-- Starter catalog: 12 real models, 4 providers, prices verified against vendor pages with per-model `_source`; `CatalogStaleWarning` after 60 days; validated in CI
+- Starter catalog: 16 real models, 5 providers, prices verified against vendor pages with per-model `_source`; `CatalogStaleWarning` after 60 days; validated in CI
 - Task-type inference: `task_type="auto"`, deterministic heuristic + optional model layer, rationale always names the layer, 40-prompt eval reporting tuned and held-out accuracy separately
 - `mock_pool(registry)` — run any real catalog end to end offline
 - `examples/agentic_workflow.py --catalog/--policy`, replacing a stray script at the repo root
