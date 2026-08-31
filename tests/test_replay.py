@@ -344,3 +344,101 @@ class FailurePropagationTests(ReplayHarness):
         self.assertEqual(live.skipped_steps, [])
         # Every planned step ran, however many the planner produced.
         self.assertEqual(len(live.steps), len(live.plan.steps))
+
+
+class NoAddedValueTests(ReplayHarness):
+    """A step can pass its own audit and still be worth nothing downstream.
+
+    Measured live (ROADMAP 1d): asked for data absent from the source, every
+    model correctly refused to fabricate and the auditor correctly passed
+    each refusal — the plan then paid for downstream steps that only
+    restated "that data is not here". `verified` cannot catch this: nothing
+    failed. This is the redundancy signal instead.
+    """
+
+    class RestatingMiddleStep:
+        """s2 (depends on s1) restates s1 rather than adding anything to it."""
+
+        name = "mock"
+
+        def complete(self, model_id, prompt, max_tokens=1024):
+            from switchboard import Completion
+
+        # The literal fence Broker._thread_context wraps injected context in
+        # (see broker.py's _CONTEXT_TEMPLATE). Distinct from the phrase
+        # "OUTPUT OF STEP" alone, which also appears in the audit prompt's
+        # own instructions and would otherwise match on every call.
+        UPSTREAM_MARKER = "(use this as your input)"
+
+        def complete(self, model_id, prompt, max_tokens=1024):
+            from switchboard import Completion
+
+            if "You are auditing" in prompt:
+                if self.UPSTREAM_MARKER not in prompt:
+                    # No upstream input in the ORIGINAL PROMPT section -- s1,
+                    # nothing to judge "added value" against.
+                    return Completion(
+                        '{"pass": true, "score": 0.9, "issues": [], "adds_value": null}',
+                        model_id, 20, 20,
+                    )
+                if "RESTATED" in prompt:
+                    return Completion(
+                        '{"pass": true, "score": 0.9, "issues": '
+                        '["adds no value over its input"], "adds_value": false}',
+                        model_id, 20, 20,
+                    )
+                return Completion(
+                    '{"pass": true, "score": 0.9, "issues": [], "adds_value": true}',
+                    model_id, 20, 20,
+                )
+            if self.UPSTREAM_MARKER in prompt:
+                return Completion("RESTATED: same conclusion as above", model_id, 20, 40)
+            return Completion("original findings", model_id, 20, 40)
+
+    def test_a_step_that_adds_no_value_stops_its_dependents(self):
+        live, _, _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        # Nothing FAILED its own audit -- this is not the failure-propagation
+        # path exercised above.
+        self.assertTrue(all(s.result.verified for s in live.steps))
+        self.assertEqual(live.skipped_steps[0][0], "s3")
+        self.assertIn("added no value", live.skipped_steps[0][1])
+
+    def test_the_step_itself_stays_reported_as_verified(self):
+        # Passing your own audit and adding nothing over your input are
+        # different questions; the fix must not repurpose `verified` to
+        # answer the second one (that is the item's stated trap).
+        live, _, _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        s2 = live.steps[1]
+        self.assertTrue(s2.result.verified)
+        self.assertIs(s2.adds_value, False)
+
+    def test_a_step_with_no_upstream_input_is_never_flagged(self):
+        # adds_value only means something once there is an input to compare
+        # against; s1 has none, so it must read None, not False.
+        live, _, _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        self.assertIsNone(live.steps[0].adds_value)
+
+    def test_skipping_stops_the_spend(self):
+        from switchboard import Policy
+
+        halting, _, _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        everything, _, _ = self.run_plan_traced(
+            provider=self.RestatingMiddleStep(),
+            policy=Policy("all", 0.5, 0.3, 0.2, plan_halt_dependents_on_failure=False),
+        )
+        self.assertLess(halting.routed_cost_usd, everything.routed_cost_usd)
+        self.assertEqual(everything.skipped_steps, [])
+        self.assertEqual(len(everything.steps), 3)
+
+    def test_a_plan_with_a_no_added_value_skip_is_never_verified(self):
+        live, _, _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        self.assertFalse(live.verified)
+
+    def test_skips_survive_replay(self):
+        live, (rep,), _ = self.run_plan_traced(provider=self.RestatingMiddleStep())
+        self.assertEqual(
+            [list(pair) for pair in live.skipped_steps],
+            [list(pair) for pair in rep.skipped_steps],
+        )
+        self.assertIs(rep.steps[1].adds_value, False)
+        self.assertIsNone(rep.steps[0].adds_value)

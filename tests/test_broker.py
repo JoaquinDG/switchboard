@@ -84,6 +84,24 @@ class AuditorTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertFalse(result.escalated)
 
+    def test_mock_reports_adds_value_true_by_default(self):
+        result = make_broker().run(Task(prompt="summarize this memo", task_type="summarization"))
+        self.assertIs(result.adds_value, True)
+
+    def test_mock_can_be_forced_to_report_no_added_value(self):
+        result = make_broker().run(
+            Task(prompt="FORCE_NO_ADDED_VALUE summarize this memo", task_type="summarization")
+        )
+        self.assertTrue(result.verified)  # still a legitimate pass
+        self.assertIs(result.adds_value, False)
+
+    def test_unaudited_result_has_no_adds_value_opinion(self):
+        policy = Policy("no-audit", 0.5, 0.3, 0.2, audit_enabled=False)
+        result = make_broker(policy=policy).run(
+            Task(prompt="summarize this memo", task_type="summarization")
+        )
+        self.assertIsNone(result.adds_value)
+
 
 class EscalationTests(unittest.TestCase):
     def test_failed_audit_escalates_one_tier(self):

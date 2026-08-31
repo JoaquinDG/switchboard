@@ -27,8 +27,17 @@ OUTPUT TO AUDIT:
 {output}
 
 Respond with ONLY a JSON object, no prose, no markdown fences:
-{{"pass": true|false, "score": 0.0-1.0, "issues": ["..."]}}
+{{"pass": true|false, "score": 0.0-1.0, "issues": ["..."], "adds_value": true|false|null}}
 Fail the output if it is incorrect, incomplete, unsafe, or ignores the prompt.
+
+If ORIGINAL PROMPT above contains a section headed "--- OUTPUT OF STEP ... ---",
+the output was produced with a prior step's result as its input. In that case
+set "adds_value" to false if the output merely restates, rephrases, or trivially
+confirms that input without adding new analysis, content, or transformation
+(this is independent of "pass" — a restatement can be accurate and still add
+nothing). Set "adds_value" to true if it genuinely builds on the input. If
+ORIGINAL PROMPT contains no such section, there is nothing to compare against:
+set "adds_value" to null.
 """
 )
 

@@ -117,6 +117,60 @@ class VerdictParsingTests(unittest.TestCase):
         self.assertEqual(v.issues, ["missing the third clause"])
 
 
+class AddsValueParsingTests(unittest.TestCase):
+    """adds_value is a tri-state, deliberately separate from pass/score."""
+
+    def test_true_is_read(self):
+        v = run_audit('{"pass": true, "score": 0.9, "issues": [], "adds_value": true}')
+        self.assertIs(v.adds_value, True)
+
+    def test_false_is_read(self):
+        v = run_audit(
+            '{"pass": true, "score": 0.9, "issues": ["restates its input"], '
+            '"adds_value": false}'
+        )
+        self.assertIs(v.adds_value, False)
+
+    def test_a_restatement_can_still_pass(self):
+        # adds_value is independent of pass/score: a restatement can be
+        # accurate and safe and still add nothing (ROADMAP 1d).
+        v = run_audit(
+            '{"pass": true, "score": 0.9, "issues": [], "adds_value": false}'
+        )
+        self.assertTrue(v.passed)
+        self.assertIs(v.adds_value, False)
+
+    def test_explicit_null_is_none(self):
+        v = run_audit('{"pass": true, "score": 0.9, "issues": [], "adds_value": null}')
+        self.assertIsNone(v.adds_value)
+
+    def test_missing_field_is_none(self):
+        # An older auditor prompt or a model that ignores the field must not
+        # be read as "adds nothing" -- that would suppress downstream steps
+        # on no evidence at all.
+        v = run_audit('{"pass": true, "score": 0.9, "issues": []}')
+        self.assertIsNone(v.adds_value)
+
+    def test_garbage_value_is_none_not_false(self):
+        # Fails open to "unknown", unlike pass/score which fail closed --
+        # this field only ever suppresses spend, so an unreadable answer must
+        # not be treated as evidence of worthlessness.
+        v = run_audit(
+            '{"pass": true, "score": 0.9, "issues": [], "adds_value": "sort of"}'
+        )
+        self.assertIsNone(v.adds_value)
+
+    def test_stringified_boolean_is_tolerated(self):
+        v = run_audit(
+            '{"pass": true, "score": 0.9, "issues": [], "adds_value": "false"}'
+        )
+        self.assertIs(v.adds_value, False)
+
+    def test_an_unparseable_verdict_leaves_adds_value_none(self):
+        v = run_audit("not json at all")
+        self.assertIsNone(v.adds_value)
+
+
 class ThresholdTests(unittest.TestCase):
     def test_pass_below_policy_threshold_is_a_failure(self):
         v = run_audit('{"pass": true, "score": 0.5, "issues": []}')

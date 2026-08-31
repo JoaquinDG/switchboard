@@ -69,6 +69,7 @@ class ReplayedStep:
     verified: bool = False
     escalated: bool = False
     truncated: bool = False
+    adds_value: bool | None = None
     generation_cost_usd: float = 0.0
     audit_cost_usd: float = 0.0
     total_cost_usd: float = 0.0
@@ -234,6 +235,7 @@ def replay_plans(records: list[dict]) -> list[ReplayedPlan]:
             step.verified = record.get("verified", False)
             step.escalated = record.get("escalated", False)
             step.truncated = record.get("truncated", False)
+            step.adds_value = record.get("adds_value")
             step.generation_cost_usd = record.get("generation_cost_usd", 0.0)
             step.audit_cost_usd = record.get("audit_cost_usd", 0.0)
             step.total_cost_usd = record.get("total_cost_usd", 0.0)
