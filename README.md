@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 342 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -252,7 +252,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 342 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -431,6 +431,8 @@ Every held-out failure collapsed to `reasoning`, the conservative default — th
 
 **Audits cost real money, and now it is measured.** Unaudited outputs are never marked `verified`. In the live run above, verification was **74% of total spend** with the default frontier auditor, peaking at **188x the generation cost** on one small task — the audit prompt carries the original prompt plus the output plus the rubric, so it has a floor a small task cannot amortise. That is fine on a 4,000-token document and absurd on a 40-token one. `Policy.auditor_selection="cheapest_qualified"` buys the cheapest model clearing `min_auditor_capability` instead. The default stays `most_capable`, because a weak auditor is a fake one.
 
+**Shadow routing compares policies for free.** `Broker(..., shadow_policy=<Policy>)` scores every task under a second policy using the same `route()` call the real decision uses — pure arithmetic over the registry already in memory — and never executes, audits, or acts on what it returns. `BrokerResult.shadow_decision` and the trace's `shadow_*` fields report which model the second policy would have chosen and its *estimated* cost, next to the real decision's own estimate, so `evals/shadow_routing_report.py` can report agreement rate and cost delta across a batch of traces. It stops at "would have chosen" on purpose: the shadow decision never runs, so it has no audit verdict and no observed cost, and treating a routing agreement as an outcome comparison would overclaim what a policy actually being evaluated has done.
+
 ## What the eval suite caught (learnings)
 
 Real bugs, found by the evals rather than the unit tests, documented rather than quietly fixed:
@@ -533,7 +535,7 @@ Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)*
 - **Batch-API pricing** — a ~50% discount the router cannot currently see.
 - **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
 
-Then: budget-aware policies, multi-auditor consensus, shadow routing for policy A/B, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
+Then: budget-aware policies, multi-auditor consensus, prompt-cache-aware costing, async providers, measured latency classes, hard capability flags, and a counterfactual "why not X?" explainer.
 
 ## Repo map
 
@@ -551,7 +553,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               342 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,

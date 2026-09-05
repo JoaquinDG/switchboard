@@ -183,10 +183,13 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** a policy knob for auditor count, verdicts aggregated by majority with disagreement recorded rather than averaged away, and the extra cost reported in the existing cost accounting.
 - **Trap:** disagreement is signal. Do not collapse a 2–1 split into a clean pass; the split is exactly what a reviewer needs to see.
 
-### 8. Shadow routing / policy A-B
-- [ ] **Why it matters:** The README argues these traces are the training data for a future learned router. Today they only record the road taken. Logging what a *second* policy would have chosen — without executing it — produces comparison data at zero extra inference cost.
+### 8. Shadow routing / policy A-B — **DONE**
+- [x] **Why it matters:** The README argues these traces are the training data for a future learned router. Today they only record the road taken. Logging what a *second* policy would have chosen — without executing it — produces comparison data at zero extra inference cost.
 - **Done looks like:** an optional shadow policy on the Broker; both decisions in the trace; a small report comparing chosen vs shadow cost and outcomes.
 - **Trap:** the shadow must never execute, never audit, and never affect the real decision. Zero added spend is the entire point.
+- **Shipped as:** `Broker(..., shadow_policy=<Policy>)`. `Broker._shadow_route` calls the same `router.route()` the real decision uses, against the same registry and the same already-resolved `Task` — pure arithmetic, no provider call, no audit — and swallows `NoQualifiedModelError`/`ValueError` from the shadow policy rather than letting a policy someone is merely evaluating take down the real request. `BrokerResult.shadow_decision` carries the full `RoutingDecision` (rationale, ranked list and all); `BrokerResult.shadow_agrees` compares the two *initial* routing choices (the shadow decision has no escalation or failover of its own). The trace gains `shadow_policy`, `shadow_chosen_model`, `shadow_est_cost_usd`, `chosen_est_cost_usd` (the real decision's own estimate, for an apples-to-apples comparison), `shadow_agrees`, and `shadow_rationale` — all `null` when no shadow policy is configured, so an unrelated trace record's shape doesn't change. `evals/shadow_routing_report.py` reads the trace and reports agreement rate and mean estimated-cost delta per (real policy, shadow policy) pair.
+- **How the trap was handled:** `_shadow_route` is called once, before the execution loop starts, and its result is never read by anything that dispatches a completion or an audit — verified directly by `tests/test_broker.py::ShadowRoutingTests::test_shadow_policy_never_calls_a_provider`, which runs the same task through an identical provider twice (with and without a shadow policy configured) and asserts the exact same sequence of `complete()` calls happens either way.
+- **Known limit:** the shadow decision is computed once, from the task as routing first sees it. It cannot show what the shadow policy would have done on escalation or failover, because those only happen to the real, executed path.
 
 ---
 
