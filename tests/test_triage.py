@@ -211,12 +211,14 @@ class TriageTaskTests(unittest.TestCase):
         original = Task(
             prompt="Summarize this.", task_type="auto",
             est_input_tokens=4321, est_output_tokens=765, needs_fast_response=True,
+            assumed_cache_hit_rate=0.6,
         )
         resolved, _ = triage_task(original)
         self.assertEqual(resolved.est_input_tokens, 4321)
         self.assertEqual(resolved.est_output_tokens, 765)
         self.assertTrue(resolved.needs_fast_response)
         self.assertEqual(resolved.prompt, original.prompt)
+        self.assertEqual(resolved.assumed_cache_hit_rate, 0.6)
 
     def test_heuristic_is_used_unless_the_model_is_requested(self):
         registry = demo_registry()

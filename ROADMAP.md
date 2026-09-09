@@ -192,10 +192,11 @@ These are the highest-value items because each one fixes something the repo curr
 
 ## Tier 3 — infrastructure and fidelity
 
-### 9. Prompt-cache-aware costing
-- [ ] **Why it matters:** Cache reads cost ~10% of standard input on major vendors, and the starter catalog already notes it is quoting cache-miss rates. Agentic workloads re-send large stable prefixes constantly, so the modelled cost of exactly the workload this library targets is systematically too high.
+### 9. Prompt-cache-aware costing — **DONE**
+- [x] **Why it matters:** Cache reads cost ~10% of standard input on major vendors, and the starter catalog already notes it is quoting cache-miss rates. Agentic workloads re-send large stable prefixes constantly, so the modelled cost of exactly the workload this library targets is systematically too high.
 - **Done looks like:** optional cache-hit-rate assumptions per task, applied in estimation, clearly labelled as assumptions rather than observations.
 - **Trap:** an assumed cache hit rate is an input, not a measurement. Never let it appear in a "measured cost" field.
+- **Shipped as:** `Task.assumed_cache_hit_rate` (default 0.0, caller-supplied, [0,1]) and `ModelSpec.cache_discount` (default 0.9 — the figure most major vendors publish for a cache read vs. a miss, an assumption in the same spirit as `UNKNOWN_CAPABILITY_PRIOR`, not verified per model). `estimate_cost` blends: `input_cost * (1 - hit_rate * cache_discount)`. `actual_cost` is untouched — it prices tokens a provider already billed, which already reflect whatever really got cached, so applying the discount there would double-count it. When `assumed_cache_hit_rate > 0`, the routing rationale names it explicitly as a caller-supplied assumption, not a measurement, so it can never be mistaken for an observed cost. `kimi-k3` in the starter catalog gets an explicit `cache_discount: 0.9` sourced from its real published rate ($0.30 cached vs. $3.00 uncached input) — the one model in the catalog where this number is verified rather than assumed; every other model uses the generic default. Triage's resolved `Task` carries the caller's assumption through unchanged, since triage cannot infer it. Tests: `tests/test_router.py::CacheHitRateCostTests`, `tests/test_registry.py` (`cache_discount` validation), and an extension of `tests/test_triage.py::test_preserves_the_caller_fields_it_cannot_infer`.
 
 ### 10. Async provider layer
 - [ ] **Why it matters:** Every call is blocking. A five-step pipeline with independent steps runs strictly serially, and audits serialise behind generation.

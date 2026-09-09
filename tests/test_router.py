@@ -14,7 +14,7 @@ from switchboard import (
     demo_registry,
     route,
 )
-from switchboard.router import _quality_score
+from switchboard.router import _quality_score, estimate_cost
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -236,6 +236,80 @@ class QualityScoreScaleTests(unittest.TestCase):
         top = decision.ranked[0]
         raw = top.spec.capability_for("reasoning")
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
+
+
+class CacheHitRateCostTests(unittest.TestCase):
+    """ROADMAP item 9: cache reads cost ~10% of a fresh read on major
+    vendors, and a caller's estimate of its own cache-hit rate is an
+    ASSUMPTION, never something Switchboard measured (the item's trap)."""
+
+    def setUp(self):
+        self.spec = ModelSpec(
+            "m", "mock", "mid", 2.0, 10.0, capabilities={"reasoning": 0.8}
+        )
+
+    def test_default_assumption_is_zero_and_leaves_cost_unchanged(self):
+        task = Task(prompt="x", est_input_tokens=1_000, est_output_tokens=100)
+        baseline = (1_000 * 2.0 + 100 * 10.0) / 1_000_000
+        self.assertAlmostEqual(estimate_cost(task, self.spec), baseline)
+
+    def test_full_assumed_hit_rate_applies_the_full_discount(self):
+        task = Task(
+            prompt="x", est_input_tokens=1_000, est_output_tokens=100,
+            assumed_cache_hit_rate=1.0,
+        )
+        # cache_discount defaults to 0.9: a fully-cached call pays 10% of the
+        # normal input price plus the unaffected output price.
+        expected = (1_000 * 2.0 * 0.1 + 100 * 10.0) / 1_000_000
+        self.assertAlmostEqual(estimate_cost(task, self.spec), expected)
+
+    def test_partial_assumed_hit_rate_blends_the_two_rates(self):
+        task = Task(
+            prompt="x", est_input_tokens=1_000, est_output_tokens=0,
+            assumed_cache_hit_rate=0.5,
+        )
+        # Half the tokens at 10% of input_cost, half at full input_cost.
+        expected = (500 * 2.0 * 0.1 + 500 * 2.0) / 1_000_000
+        self.assertAlmostEqual(estimate_cost(task, self.spec), expected)
+
+    def test_per_model_cache_discount_overrides_the_default(self):
+        cheap_cache_spec = ModelSpec(
+            "kimi-like", "mock", "frontier", 3.0, 15.0, cache_discount=0.9,
+            capabilities={"reasoning": 0.9},
+        )
+        task = Task(prompt="x", est_input_tokens=1_000, est_output_tokens=0,
+                    assumed_cache_hit_rate=1.0)
+        expected = (1_000 * 3.0 * 0.1) / 1_000_000
+        self.assertAlmostEqual(estimate_cost(task, cheap_cache_spec), expected)
+
+    def test_out_of_range_hit_rate_rejected(self):
+        with self.assertRaises(ValueError):
+            Task(prompt="x", assumed_cache_hit_rate=1.5)
+
+    def test_rationale_names_the_assumption_when_used(self):
+        registry = demo_registry()
+        task = Task(prompt="hi", task_type="reasoning", complexity=0.1,
+                    assumed_cache_hit_rate=0.8)
+        decision = route(task, registry, BALANCED)
+        self.assertIn("assumes 80% of input tokens are cache hits", decision.rationale)
+        self.assertIn("not measured", decision.rationale)
+
+    def test_rationale_omits_the_note_when_no_assumption_is_made(self):
+        # Default behaviour, and existing rationale format, must not change
+        # for the common case where no caller opts into a cache assumption.
+        registry = demo_registry()
+        task = Task(prompt="hi", task_type="reasoning", complexity=0.1)
+        decision = route(task, registry, BALANCED)
+        self.assertNotIn("cache", decision.rationale)
+
+    def test_assumed_hit_rate_never_affects_actual_cost(self):
+        # actual_cost prices tokens a provider already billed; it takes no
+        # Task at all, so a cache assumption has no path to reach it.
+        from switchboard.router import actual_cost
+        self.assertAlmostEqual(
+            actual_cost(self.spec, 1_000, 100),
+            (1_000 * 2.0 + 100 * 10.0) / 1_000_000,
+        )
 
 
 if __name__ == "__main__":

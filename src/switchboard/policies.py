@@ -35,10 +35,20 @@ class Task:
     est_input_tokens: int = 1_000
     est_output_tokens: int = 500
     needs_fast_response: bool = False
+    # Fraction of est_input_tokens the CALLER ASSUMES will be served from a
+    # prompt cache rather than processed fresh -- an agentic loop re-sending a
+    # large stable system prompt might set 0.8; a one-shot call leaves the
+    # default of 0.0. This is an input the caller supplies about anticipated
+    # future behaviour, not something Switchboard observes, and it only
+    # affects estimate_cost -- actual_cost prices what a provider actually
+    # billed, which already reflects whatever really got cached.
+    assumed_cache_hit_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.complexity <= 1.0:
             raise ValueError("complexity must be in [0, 1]")
+        if not 0.0 <= self.assumed_cache_hit_rate <= 1.0:
+            raise ValueError("assumed_cache_hit_rate must be in [0, 1]")
         if not self.task_type:
             raise ValueError("task_type must be a non-empty string")
         for label, value in (

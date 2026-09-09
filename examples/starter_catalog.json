@@ -24,7 +24,15 @@
     "prices above, recorded here so the difference is visible. They replaced",
     "conservative placeholders that understated several models by 5x. The",
     "router does not read this field yet (ROADMAP item 2); when it does, the",
-    "old placeholders would have excluded models that can do the work."
+    "old placeholders would have excluded models that can do the work.",
+    "",
+    "CACHE_DISCOUNT defaults to 0.9 (a cache read costing 10% of a cache miss)",
+    "for every model, which is an ASSUMPTION about the figure most major",
+    "vendors publish for prompt caching \u2014 not verified per model. kimi-k3 is",
+    "the one exception: its 0.9 is the real vendor rate ($0.30 cached vs $3.00",
+    "uncached input), see that entry's _note. estimate_cost only applies a",
+    "discount when a Task sets assumed_cache_hit_rate above 0, which is itself",
+    "always the caller's assumption, never something Switchboard observed."
   ],
   "_sources": {
     "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
@@ -56,7 +64,7 @@
     "  tokens for the same text, so per-token price alone understates their",
     "  relative cost. Switchboard bills on observed token counts, so real runs",
     "  reflect this; the est_*_tokens on a Task do not.",
-    "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing Switchboard does not model.",
+    "Kimi prices are cache-MISS input rates; kimi-k3 cached input is $0.30 vs $3.00 uncached, a 10x swing. Switchboard models this via cache_discount, but only for a Task that sets assumed_cache_hit_rate -- the discount is never applied unless a caller opts in.",
     "kimi-k2.7-code-highspeed is the same model as kimi-k2.7-code at exactly double the price for ~180-260 tok/s output. It is in the catalog because it makes the latency weight mean something real.",
     "A vendor listing a model in /models does not mean the chat endpoint accepts it. Verify with live_check.py --probe, which makes one 1-token call per model.",
     "An independent index (OpenRouter) disagrees with six of these prices as of 2026-08-16 -- three by exactly half, which looks like a tier difference rather than a price change, and DeepSeek by more, on the day its dynamic peak/off-peak pricing began. Run examples/catalog_crosscheck.py to see the current disagreements. Only the vendor's own page settles them."
@@ -292,7 +300,9 @@
       "output_cost": 15.0,
       "latency": "slow",
       "context_window": 1048576,
+      "cache_discount": 0.9,
       "_source": "https://platform.kimi.ai/docs/pricing/chat-k3",
+      "_note": "cache_discount 0.9 is the REAL vendor rate ($0.30 cached vs $3.00 uncached input), not the catalog default -- the only cache_discount in this file that is verified rather than assumed.",
       "capabilities": {
         "reasoning": 0.92,
         "coding": 0.92,

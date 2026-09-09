@@ -75,9 +75,19 @@ class RoutingDecision:
 
 
 def estimate_cost(task: Task, spec: ModelSpec) -> float:
-    """Estimated USD cost of running this task on this model."""
+    """Estimated USD cost of running this task on this model.
+
+    ``task.assumed_cache_hit_rate`` discounts that fraction of input tokens by
+    ``spec.cache_discount``. Both are ASSUMPTIONS the caller/catalog supply
+    about anticipated cache behaviour, not observations -- see their
+    docstrings. This must never reach ``actual_cost``, which prices tokens a
+    provider already billed and so already reflects whatever really got
+    cached; applying the discount there would double-count it.
+    """
+    hit_rate = task.assumed_cache_hit_rate
+    effective_input_cost = spec.input_cost * (1.0 - hit_rate * spec.cache_discount)
     return (
-        task.est_input_tokens * spec.input_cost
+        task.est_input_tokens * effective_input_cost
         + task.est_output_tokens * spec.output_cost
     ) / 1_000_000
 
@@ -269,6 +279,13 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
         parts.append(
             f"runner-up {runner.spec.model_id} scored "
             f"{runner.score:.3f} vs {top.score:.3f}"
+        )
+    if task.assumed_cache_hit_rate > 0.0:
+        # Cost figures above already bake this in; name it so a reviewer
+        # never mistakes an assumption for an observed cost.
+        parts.append(
+            f"cost assumes {task.assumed_cache_hit_rate:.0%} of input tokens "
+            f"are cache hits (caller-supplied assumption, not measured)"
         )
     parts.extend(f"WARNING: {w}" for w in warnings)
 
