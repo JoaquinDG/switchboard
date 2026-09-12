@@ -25,6 +25,17 @@ class NoQualifiedModelError(RuntimeError):
     """Raised when nothing qualifies and the policy says to fail loudly."""
 
 
+class ContextWindowExceededError(RuntimeError):
+    """Raised when no model in the registry can hold the task's token estimate.
+
+    Unlike the qualification gate, this has no policy-selectable fallback.
+    "Escalate to a bigger tier" and "keep the most capable model anyway" both
+    assume the fallback can still attempt the work; a model whose context
+    window is too small cannot, regardless of tier or capability, so there is
+    nothing honest to degrade to. This always raises.
+    """
+
+
 @dataclass(frozen=True)
 class Task:
     """A unit of work to route."""

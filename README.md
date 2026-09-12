@@ -11,7 +11,7 @@
 Zero dependencies. Runs fully offline out of the box. `git clone`, run the tests, see it work in under a minute.
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests   # 334 tests
+PYTHONPATH=src python3 -m unittest discover -s tests   # 342 tests
 PYTHONPATH=src python3 evals/routing_eval.py           # 9 routing scenarios
 PYTHONPATH=src python3 evals/triage_eval.py            # 40 labeled prompts
 PYTHONPATH=src python3 examples/quickstart.py          # full demo, no API keys
@@ -223,11 +223,12 @@ flowchart LR
 
 Routing runs gates before scores:
 
-1. **Frontier gate** — complexity above the policy threshold is only eligible for frontier models, regardless of cost pressure.
-2. **Qualification gate** — a model's capability for the task type must clear the task's complexity by a margin. A model should never win a task it isn't qualified for just because it's cheap.
-3. **Weighted scoring** — survivors are scored on quality, log-normalized cost (over the full catalog range), and latency, per policy weights. Every decision returns the full ranked list and a human-readable rationale.
+1. **Context-window gate** — a model whose context window cannot hold the task's estimated input plus output tokens is excluded before anything else runs. This is capacity, not quality: no amount of cost or capability pressure can buy back tokens that do not fit, so it is checked first and never folded into the weighted score. Escalation applies the identical check (`fits_context`), so a failed audit cannot escalate into a model that would hard-fail at the provider instead.
+2. **Frontier gate** — complexity above the policy threshold is only eligible for frontier models, regardless of cost pressure.
+3. **Qualification gate** — a model's capability for the task type must clear the task's complexity by a margin. A model should never win a task it isn't qualified for just because it's cheap.
+4. **Weighted scoring** — survivors are scored on quality, log-normalized cost (over the full catalog range), and latency, per policy weights. Every decision returns the full ranked list and a human-readable rationale.
 
-**Gates degrade upward, never open.** If a gate would leave zero candidates, the fallback is the most capable tier available plus a warning on the decision — not a silent return to the full catalog. Falling back to the full catalog hands the decision to cost weight, which is exactly what the gate existed to prevent. `RoutingDecision.underqualified` and `.warnings` carry that out to the caller, and `Policy.on_no_qualified_model` can make it raise instead.
+**Gates degrade upward, never open.** If a gate would leave zero candidates, the fallback is the most capable tier available plus a warning on the decision — not a silent return to the full catalog. Falling back to the full catalog hands the decision to cost weight, which is exactly what the gate existed to prevent. `RoutingDecision.underqualified` and `.warnings` carry that out to the caller, and `Policy.on_no_qualified_model` can make it raise instead. The context-window gate is the one exception: there is no "next tier up" for capacity, so if nothing in the registry can hold the task it raises `ContextWindowExceededError` rather than guessing.
 
 ## Starter catalog
 
@@ -252,7 +253,7 @@ Everything above is offline and mocked, and that honesty has a cost: `verified: 
 PYTHONPATH=src python3 examples/live_check.py --catalog examples/starter_catalog.json
 ```
 
-Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 334 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
+Every `model_id` in a catalog is a claim that a string will be accepted by a vendor, and **nothing in the offline suite can check it** — `MockProvider` answers to any id you give it. A typo, a renamed model, or an id copied from a pricing page that uses display names rather than API names survives all 342 tests and then fails as a hard 404 on first real traffic. This lists what each key can actually reach, diffs it against the catalog, and suggests close matches for anything missing. It only issues GETs to the models endpoints, so it generates no tokens.
 
 **Step 2 — run real tasks. This spends money.**
 
@@ -473,7 +474,7 @@ Real bugs, found by the evals rather than the unit tests, documented rather than
 
 23. **A verified step can still be worthless downstream, and nothing catches it.** The live test built to exercise failure-halting never triggered it: asked to extract per-region revenue that was not in the source, every model **correctly refused to invent it**, and the cross-lab auditor **correctly passed** those honest refusals (0.95 / 0.72 / 0.80). Good behaviour all round — and $0.02531 spent producing three variations of *"that data is not here"*. The halt mechanism never fires because nothing *failed*; a refusal is a verified answer. The auditor saw it clearly, scoring s2 at 0.72 with *"adds no value over step s1 — essentially a verbatim restatement, so the step is redundant"*, but `verified` is a boolean and 0.72 clears the 0.70 bar. Decomposition assumes each step can do its job; when an early step legitimately cannot, the plan pays full price for downstream steps that can only restate it. Tracked as ROADMAP 1d rather than patched, because "detect a useless-but-valid answer" is a much harder problem than it first looks.
 
-24. **Our catalog understated six context windows by 5x, and item 2 would have inherited it.** Cross-checking against an independent public index (`examples/catalog_crosscheck.py`) found every OpenAI and Google model carrying a conservative `200000` placeholder against a real window of ~1,050,000. Harmless today — the router does not read the field — but ROADMAP item 2 exists to make it a *hard gate*, and shipping that against these numbers would have excluded models that can comfortably do the work. Placeholders are only harmless while nothing depends on them.
+24. **Our catalog understated six context windows by 5x, and item 2 would have inherited it.** Cross-checking against an independent public index (`examples/catalog_crosscheck.py`) found every OpenAI and Google model carrying a conservative `200000` placeholder against a real window of ~1,050,000. Harmless at the time — the router did not yet read the field — but ROADMAP item 2 was always going to make it a *hard gate* (now shipped, see above), and building that against these numbers would have excluded models that can comfortably do the work. Placeholders are only harmless while nothing depends on them.
 
 25. **Two thirds of the catalog spends thinking tokens by default.** The index reports `reasoning.default_enabled` per model: **10 of 15** matched models, including every Anthropic and OpenAI entry. That is the root cause of the truncation failures found three separate times in this repo, quantified — not an occasional quirk of one model but the normal case. It also means a `max_tokens` default chosen for non-reasoning models is wrong for most of the catalog.
 
@@ -528,7 +529,6 @@ Queue entries are strings (returned) or exceptions (raised); the last entry repe
 Full backlog with rationale and acceptance criteria: **[ROADMAP.md](ROADMAP.md)**. The highest-value items are the ones that fix something the repo currently gets wrong rather than something it merely lacks:
 
 - **Trace-driven catalog feedback** — replace the starter catalog's *estimated* capability scores with pass-rates measured from `traces/*.jsonl`. The weakest claim in the repo, and the data is already being recorded.
-- **Context-window awareness** — `ModelSpec.context_window` is stored, validated, and never read by the router. A task larger than a model's window can be routed to it today.
 - **Tokenizer-aware cost** — the catalog notes that Claude 4.7+ produce ~30% more tokens for the same text, so comparing vendors on per-token price alone is biased.
 - **Batch-API pricing** — a ~50% discount the router cannot currently see.
 - **Confidence-gated triage** — the heuristic's failures cluster where it reports `0.00` confidence; spend a model call only there.
@@ -551,7 +551,7 @@ src/switchboard/
   broker.py          route -> run -> audit -> escalate w/ findings -> failover, costs, tracing
   providers/         Provider protocol, offline mock + scripted double, HTTP adapters with retries
 ROADMAP.md           the working backlog: what to build next and how not to fake it
-tests/               334 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
+tests/               342 tests (router, gates, triage, auditor, costs, resilience, catalog, live wiring)
 evals/               9 routing scenarios, 40 triage prompts, 24 planner cases,
                      catalog_feedback (measured capability from traces)
 examples/            quickstart, agentic workflow (--plan), live_check/live_run,

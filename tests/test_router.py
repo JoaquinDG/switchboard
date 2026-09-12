@@ -6,6 +6,7 @@ from switchboard import (
     BALANCED,
     COST_FIRST,
     QUALITY_FIRST,
+    ContextWindowExceededError,
     ModelSpec,
     NoQualifiedModelError,
     Policy,
@@ -236,6 +237,102 @@ class QualityScoreScaleTests(unittest.TestCase):
         top = decision.ranked[0]
         raw = top.spec.capability_for("reasoning")
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
+
+
+class ContextWindowGateTests(unittest.TestCase):
+    """ROADMAP item 2: `ModelSpec.context_window` was stored and validated but
+    never read by the router, so a task whose estimated tokens exceed a
+    model's window could be routed there and fail at the provider instead of
+    being caught as a routing constraint."""
+
+    def setUp(self):
+        self.registry = Registry([
+            ModelSpec(
+                "big-context", "mock", "mid", input_cost=1.0, output_cost=2.0,
+                context_window=100_000, capabilities={"reasoning": 0.80},
+            ),
+            ModelSpec(
+                "small-context", "mock", "small", input_cost=0.1, output_cost=0.5,
+                context_window=2_000, capabilities={"reasoning": 0.60},
+            ),
+        ])
+
+    def test_model_too_small_for_the_task_is_excluded(self):
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.2,
+            est_input_tokens=50_000, est_output_tokens=1_000,
+        )
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "big-context")
+        self.assertIn("context window gate applied", decision.gates)
+
+    def test_exclusion_is_named_in_the_rationale(self):
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.2,
+            est_input_tokens=50_000, est_output_tokens=1_000,
+        )
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertTrue(any("small-context" in w for w in decision.warnings))
+        self.assertIn("small-context", decision.rationale)
+
+    def test_small_task_leaves_the_gate_untouched(self):
+        # Default Task token estimates (1,000 in + 500 out) fit both models —
+        # the gate must stay silent rather than firing on every decision.
+        task = Task(prompt="x", task_type="reasoning", complexity=0.2)
+        decision = route(task, self.registry, BALANCED)
+        self.assertNotIn("context window gate applied", decision.gates)
+        self.assertEqual(decision.warnings, [])
+
+    def test_nothing_in_the_catalog_fits_raises(self):
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.2,
+            est_input_tokens=500_000, est_output_tokens=1_000,
+        )
+        with self.assertRaises(ContextWindowExceededError):
+            route(task, self.registry, BALANCED)
+
+    def test_gate_is_not_folded_into_the_score(self):
+        # Trap: this must be a hard exclusion, not a weighted "headroom" term.
+        # A model that survives the gate should score purely on quality/cost/
+        # latency, with no trace of context headroom anywhere in the total.
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.2,
+            est_input_tokens=50_000, est_output_tokens=1_000,
+        )
+        decision = route(task, self.registry, BALANCED)
+        survivor = decision.ranked[0]
+        self.assertEqual(len(decision.ranked), 1)  # small-context did not survive to be scored
+        self.assertEqual(survivor.spec.model_id, "big-context")
+
+    def test_context_gate_runs_before_the_frontier_gate(self):
+        # A frontier model too small for the task must not survive purely
+        # because the frontier gate would otherwise force frontier tier.
+        registry = Registry([
+            ModelSpec(
+                "frontier-tiny", "mock", "frontier", 3.0, 15.0,
+                context_window=1_000, capabilities={"reasoning": 0.95},
+            ),
+            ModelSpec(
+                "mid-big", "mock", "mid", 0.8, 4.0,
+                context_window=100_000, capabilities={"reasoning": 0.80},
+            ),
+        ])
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.9,
+            est_input_tokens=50_000, est_output_tokens=1_000,
+        )
+        decision = route(task, registry, QUALITY_FIRST)
+        self.assertEqual(decision.chosen.model_id, "mid-big")
+
+    def test_error_names_the_shortfall(self):
+        task = Task(
+            prompt="x", task_type="reasoning", complexity=0.2,
+            est_input_tokens=500_000, est_output_tokens=1_000,
+        )
+        with self.assertRaises(ContextWindowExceededError) as ctx:
+            route(task, self.registry, BALANCED)
+        self.assertIn("501000", str(ctx.exception))
+        self.assertIn("100000", str(ctx.exception))  # largest available window
 
 
 if __name__ == "__main__":
