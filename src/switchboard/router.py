@@ -75,15 +75,26 @@ class RoutingDecision:
 
 
 def estimate_cost(task: Task, spec: ModelSpec) -> float:
-    """Estimated USD cost of running this task on this model."""
+    """Estimated USD cost of running this task on this model.
+
+    Scales the task's estimated token counts by ``spec.token_multiplier``
+    first. A vendor's per-token price alone understates real cost for a
+    model whose tokenizer produces more tokens for the same text (ROADMAP
+    item 3) — comparing prices without it silently favours that vendor.
+    """
     return (
-        task.est_input_tokens * spec.input_cost
-        + task.est_output_tokens * spec.output_cost
+        task.est_input_tokens * spec.token_multiplier * spec.input_cost
+        + task.est_output_tokens * spec.token_multiplier * spec.output_cost
     ) / 1_000_000
 
 
 def actual_cost(spec: ModelSpec, input_tokens: int, output_tokens: int) -> float:
-    """USD cost of a completed call, from observed token counts."""
+    """USD cost of a completed call, from observed token counts.
+
+    No ``token_multiplier`` here: these counts are what the provider actually
+    billed, already reflecting whichever tokenizer ran. Applying the
+    multiplier on top would double-count it against a real invoice.
+    """
     return (input_tokens * spec.input_cost + output_tokens * spec.output_cost) / 1_000_000
 
 

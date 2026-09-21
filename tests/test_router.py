@@ -11,7 +11,9 @@ from switchboard import (
     Policy,
     Registry,
     Task,
+    actual_cost,
     demo_registry,
+    estimate_cost,
     route,
 )
 from switchboard.router import _quality_score
@@ -236,6 +238,52 @@ class QualityScoreScaleTests(unittest.TestCase):
         top = decision.ranked[0]
         raw = top.spec.capability_for("reasoning")
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
+
+
+class TokenMultiplierCostTests(unittest.TestCase):
+    """ROADMAP item 3: a model whose tokenizer produces more tokens for the
+    same text is cheaper on paper than it really is if price is compared
+    per-token alone. token_multiplier corrects the *estimate* only."""
+
+    def spec(self, **overrides):
+        base = dict(model_id="m", provider="mock", tier="mid", input_cost=1.0, output_cost=1.0)
+        base.update(overrides)
+        return ModelSpec(**base)
+
+    def test_default_multiplier_leaves_estimate_unchanged(self):
+        task = Task(prompt="x", est_input_tokens=1_000_000, est_output_tokens=1_000_000)
+        self.assertEqual(estimate_cost(task, self.spec()), 2.0)
+
+    def test_multiplier_scales_both_input_and_output_estimate(self):
+        task = Task(prompt="x", est_input_tokens=1_000_000, est_output_tokens=1_000_000)
+        heavy = self.spec(token_multiplier=1.3)
+        self.assertAlmostEqual(estimate_cost(task, heavy), 2.6)
+
+    def test_two_models_priced_equally_per_token_differ_once_tokenizer_is_modeled(self):
+        # Same input_cost/output_cost, so a naive per-token comparison would
+        # call these two models equally expensive. They are not, once one of
+        # them needs 30% more tokens to say the same thing.
+        task = Task(prompt="x", est_input_tokens=1_000, est_output_tokens=1_000)
+        light, heavy = self.spec(), self.spec(model_id="m2", token_multiplier=1.3)
+        self.assertGreater(estimate_cost(task, heavy), estimate_cost(task, light))
+
+    def test_actual_cost_ignores_token_multiplier(self):
+        # actual_cost prices tokens a provider already reported -- those
+        # already reflect whichever tokenizer ran. Applying the multiplier
+        # there would double-count it against a real invoice.
+        heavy = self.spec(token_multiplier=1.3)
+        self.assertEqual(actual_cost(heavy, 1_000_000, 1_000_000), 2.0)
+
+    def test_heavier_tokenizer_model_ranks_behind_an_equally_priced_lighter_one(self):
+        # score_models calls estimate_cost internally; a routing decision
+        # should reflect the corrected cost, not the sticker price.
+        registry = Registry([
+            self.spec(tier="mid", capabilities={"reasoning": 0.8}),
+            self.spec(model_id="m2", tier="mid", token_multiplier=1.3, capabilities={"reasoning": 0.8}),
+        ])
+        task = Task(prompt="x", task_type="reasoning", complexity=0.3)
+        decision = route(task, registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "m")
 
 
 if __name__ == "__main__":
