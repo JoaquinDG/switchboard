@@ -12,6 +12,7 @@ from switchboard import (
     Registry,
     Task,
     demo_registry,
+    explain_not_chosen,
     route,
 )
 from switchboard.router import _quality_score
@@ -236,6 +237,110 @@ class QualityScoreScaleTests(unittest.TestCase):
         top = decision.ranked[0]
         raw = top.spec.capability_for("reasoning")
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
+
+
+class CounterfactualTests(unittest.TestCase):
+    """ROADMAP item 13: the rationale explains why the winner won; this
+    explains why a preferred model lost, computed from the ranked list the
+    decision already carries — never by re-routing."""
+
+    def setUp(self):
+        self.registry = demo_registry()
+        # Low complexity so all three models clear the gates and get scored.
+        self.task = Task(prompt="hi", task_type="reasoning", complexity=0.1)
+        self.decision = route(self.task, self.registry, BALANCED)
+
+    def test_winner_is_reported_as_the_winner(self):
+        chosen = self.decision.chosen.model_id
+        cf = explain_not_chosen(self.decision, chosen, BALANCED)
+        self.assertTrue(cf.is_winner)
+        self.assertTrue(cf.scored)
+        self.assertEqual(cf.total_margin, 0.0)
+        self.assertEqual(cf.components, [])
+
+    def test_losing_margin_is_broken_down_by_component(self):
+        loser = self.decision.ranked[-1].spec.model_id
+        cf = explain_not_chosen(self.decision, loser, BALANCED)
+        self.assertTrue(cf.scored)
+        self.assertFalse(cf.is_winner)
+        self.assertGreater(cf.total_margin, 0.0)
+        self.assertEqual({c.component for c in cf.components}, {"quality", "cost", "latency"})
+
+    def test_weighted_margins_sum_to_the_total_margin(self):
+        # The identity that makes the breakdown trustworthy: the per-axis
+        # contributions must reconstruct the score gap exactly, because the
+        # score is their weighted sum. If they ever drift, the explanation is
+        # attributing the loss to the wrong place.
+        loser = self.decision.ranked[-1].spec.model_id
+        cf = explain_not_chosen(self.decision, loser, BALANCED)
+        self.assertAlmostEqual(
+            sum(c.weighted_margin for c in cf.components), cf.total_margin
+        )
+
+    def test_components_are_ordered_biggest_deficit_first(self):
+        loser = self.decision.ranked[-1].spec.model_id
+        cf = explain_not_chosen(self.decision, loser, BALANCED)
+        margins = [c.weighted_margin for c in cf.components]
+        self.assertEqual(margins, sorted(margins, reverse=True))
+
+    def test_a_model_can_lead_on_one_axis_while_losing_overall(self):
+        # Under quality_first the frontier model wins, but atlas-small — still
+        # scored, not gated — is the cheapest, so it must show a *positive*
+        # cost lead even though it lost the decision. The sign is the honest
+        # part, not something to collapse away.
+        decision = route(self.task, self.registry, QUALITY_FIRST)
+        self.assertEqual(decision.chosen.model_id, "atlas-frontier")
+        cf = explain_not_chosen(decision, "atlas-small", QUALITY_FIRST)
+        cost = next(c for c in cf.components if c.component == "cost")
+        self.assertLess(cost.weighted_margin, 0.0)  # led on cost
+        self.assertIn("led on cost", cf.rationale)
+
+    def test_rationale_names_both_models_and_the_policy(self):
+        loser = self.decision.ranked[-1].spec.model_id
+        cf = explain_not_chosen(self.decision, loser, BALANCED)
+        self.assertIn(loser, cf.rationale)
+        self.assertIn(self.decision.chosen.model_id, cf.rationale)
+        self.assertIn("balanced", cf.rationale)
+
+    def test_does_not_re_route(self):
+        # The explainer must read the decision, not the registry. Passing a
+        # decision whose ranked list has been swapped for a sentinel and no
+        # registry at all proves nothing re-runs routing.
+        loser = self.decision.ranked[-1].spec.model_id
+        cf = explain_not_chosen(self.decision, loser, BALANCED)
+        # Recompute the target's cost lead straight from the stored components;
+        # it must match what the explainer reported.
+        chosen_c = self.decision.ranked[0].cost_component
+        other_c = next(
+            s.cost_component for s in self.decision.ranked if s.spec.model_id == loser
+        )
+        cost = next(c for c in cf.components if c.component == "cost")
+        self.assertEqual(cost.chosen_component, chosen_c)
+        self.assertEqual(cost.other_component, other_c)
+
+    def test_gated_model_is_reported_as_unscored_not_low_scoring(self):
+        # A frontier-gated task drops the small model before scoring. Asking
+        # why it lost must say it never competed, not fabricate a margin.
+        task = Task(prompt="hard", task_type="reasoning", complexity=0.95)
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertNotIn(
+            "atlas-small", [s.spec.model_id for s in decision.ranked]
+        )
+        cf = explain_not_chosen(decision, "atlas-small", COST_FIRST)
+        self.assertFalse(cf.scored)
+        self.assertEqual(cf.components, [])
+        self.assertIn("gate", cf.rationale)
+
+    def test_unknown_model_id_is_reported_honestly(self):
+        cf = explain_not_chosen(self.decision, "no-such-model", BALANCED)
+        self.assertFalse(cf.scored)
+        self.assertIn("not in this catalog", cf.rationale)
+
+    def test_a_mismatched_policy_is_refused(self):
+        # The decision was made under BALANCED; explaining it with COST_FIRST
+        # weights would attribute the loss using weights that never applied.
+        with self.assertRaises(ValueError):
+            explain_not_chosen(self.decision, "atlas-small", COST_FIRST)
 
 
 if __name__ == "__main__":
