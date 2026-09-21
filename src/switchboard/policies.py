@@ -35,6 +35,13 @@ class Task:
     est_input_tokens: int = 1_000
     est_output_tokens: int = 500
     needs_fast_response: bool = False
+    # Latency-insensitive: this task can wait for a vendor's asynchronous
+    # batch queue (typically minutes to hours) instead of a live response.
+    # Routing prices it at the model's batch_discount rate when the catalog
+    # has one. Mutually exclusive with needs_fast_response by construction —
+    # nothing can simultaneously need an immediate answer and tolerate a
+    # queued one.
+    batch_eligible: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.complexity <= 1.0:
@@ -47,6 +54,12 @@ class Task:
         ):
             if not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be a non-negative int, got {value!r}")
+        if self.needs_fast_response and self.batch_eligible:
+            raise ValueError(
+                "needs_fast_response and batch_eligible are mutually exclusive: "
+                "a task cannot both require an immediate response and be "
+                "eligible for a vendor's asynchronous batch queue"
+            )
 
 
 @dataclass(frozen=True)

@@ -66,6 +66,19 @@ class ModelSpecValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.spec(model_id="")
 
+    def test_batch_discount_defaults_to_zero(self):
+        self.assertEqual(self.spec().batch_discount, 0.0)
+
+    def test_batch_discount_of_one_rejected(self):
+        # A discount of exactly 1.0 means the work is free, which no vendor
+        # offers; disallowed so it can't silently zero out a routing decision.
+        with self.assertRaises(ValueError):
+            self.spec(batch_discount=1.0)
+
+    def test_negative_batch_discount_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(batch_discount=-0.1)
+
 
 class RegistryTests(unittest.TestCase):
     def test_duplicate_model_id_rejected(self):
