@@ -202,10 +202,28 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** `asyncio` variants of Provider and Broker, the existing sync API unchanged and still tested, no new dependencies.
 - **Trap:** do not fork the codebase into two half-maintained paths. Share the routing, auditing, and accounting logic.
 
-### 11. Measured latency classes
-- [ ] **Why it matters:** `fast` / `medium` / `slow` are assigned by tier and never measured, yet latency is a full third of the `balanced` policy weighting. One of three routing inputs is currently a guess.
-- **Done looks like:** wall-clock timing recorded per attempt in traces, and a report of observed p50/p95 per model to inform the catalog's latency classes.
-- **Trap:** mock timings are meaningless. The report must state whether the traces came from real providers, and refuse to draw conclusions from mock runs.
+### 11. Measured latency classes — **DONE**
+- [x] `Attempt.latency_ms` (`broker.py`) times each generation call wall-clock,
+  start to return or to the raised error, and rides along in the existing
+  JSONL trace via `asdict`. `evals/latency_report.py` reads `traces/*.jsonl`
+  and reports observed p50/p95 per model next to the catalog's assigned
+  `fast`/`medium`/`slow` class.
+- **Why it mattered:** `fast` / `medium` / `slow` are assigned by tier and
+  never measured, yet latency is a full third of the `balanced` policy
+  weighting. One of three routing inputs was a guess.
+- **How the trap was handled:** the report excludes every attempt whose
+  `synthetic` flag is true or absent *before* computing anything — a
+  MockProvider or ScriptedProvider call returns in microseconds, which is a
+  dict-lookup measurement, not a vendor one. Verified live: pointing it at a
+  trace built entirely from mocked runs prints "every attempt was synthetic
+  ... no measured data to report" rather than a table; pointing it at a trace
+  with `synthetic: false` attempts prints p50/p95. It updates nothing —
+  reclassifying a model's `latency` field from the numbers is a manual,
+  by-hand step, the same way item 1 leaves capability scores to a human.
+- **Also recorded:** a failed provider call still gets a `latency_ms` (a
+  timeout is a latency observation too), but the report counts those
+  separately under `errored` and excludes them from p50/p95 — time-to-failure
+  and response latency are different measurements.
 
 ### 12. Hard capability flags
 - [ ] **Why it matters:** Capabilities are all soft 0–1 scores, but some requirements are binary: JSON mode, tool use, vision, a minimum context. A model either supports structured output or it does not, and no amount of cheapness compensates.
