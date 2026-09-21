@@ -10,7 +10,10 @@ Design principles:
 3. Gates degrade upward, never open. If a gate would leave zero candidates,
    the fallback is the most capable tier available plus a loud warning — not
    a silent return to the full catalog. Opening the field back up means cost
-   decides, which is exactly what the gate existed to prevent.
+   decides, which is exactly what the gate existed to prevent. The one
+   exception is the feature-flag gate: tier tracks capability, not feature
+   support, so there is no "next tier up" to degrade to and it raises
+   instead of guessing.
 4. Costs are normalized on a log scale, because model prices span orders of
    magnitude and a linear scale would make cost dominate every decision.
 5. Quality is normalized against a fixed floor (UNKNOWN_CAPABILITY_PRIOR),
@@ -24,7 +27,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .policies import NoQualifiedModelError, Policy, Task
+from .policies import NoQualifiedModelError, Policy, Task, UnsupportedFeatureError
 from .registry import TIER_RANK, UNKNOWN_CAPABILITY_PRIOR, ModelSpec, Registry
 
 _LATENCY_SCORE = {"fast": 1.0, "medium": 0.6, "slow": 0.2}
@@ -85,6 +88,18 @@ def estimate_cost(task: Task, spec: ModelSpec) -> float:
 def actual_cost(spec: ModelSpec, input_tokens: int, output_tokens: int) -> float:
     """USD cost of a completed call, from observed token counts."""
     return (input_tokens * spec.input_cost + output_tokens * spec.output_cost) / 1_000_000
+
+
+def fits_features(task: Task, spec: ModelSpec) -> bool:
+    """True if spec supports every feature the task requires.
+
+    A hard capability check, not a quality judgment: JSON mode, tool use, and
+    vision are things a model's API either does or doesn't offer, and no
+    amount of raw capability score substitutes for a feature it lacks. Public
+    so escalation (`Broker._escalation_target`) can apply the identical check
+    — the same reason `estimate_cost`/`score_models` are public.
+    """
+    return spec.supports(task.required_features)
 
 
 def _cost_score(cost: float, min_cost: float, max_cost: float) -> float:
@@ -183,6 +198,30 @@ def route(task: Task, registry: Registry, policy: Policy) -> RoutingDecision:
 
     gates: list[str] = []
     warnings: list[str] = []
+
+    # Gate 0: required features. Checked before every other gate because it is
+    # an API capability fact, not a quality judgment — a model that cannot do
+    # JSON mode, tool use, or vision is not a worse choice, it is not a
+    # choice, and no amount of cost or capability pressure should route
+    # around it. It is a gate, never a weighted score (see module docstring).
+    if task.required_features:
+        feature_ok = [m for m in candidates if fits_features(task, m)]
+        if not feature_ok:
+            missing = sorted(task.required_features)
+            supported = sorted({f for m in candidates for f in m.features})
+            raise UnsupportedFeatureError(
+                f"no model in the registry supports required feature(s) "
+                f"{missing} for task_type={task.task_type!r}; catalog offers "
+                f"{supported or '(none)'}"
+            )
+        if len(feature_ok) < len(candidates):
+            excluded = sorted(m.model_id for m in candidates if m not in feature_ok)
+            gates.append("feature flag gate applied")
+            warnings.append(
+                f"feature flag gate excluded {', '.join(excluded)}: missing "
+                f"required feature(s) {sorted(task.required_features)}"
+            )
+        candidates = feature_ok
 
     # A task type nobody has scored means every model returns the same prior,
     # so the quality term is dead weight and cost silently decides. That used

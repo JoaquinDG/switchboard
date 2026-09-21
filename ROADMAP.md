@@ -207,10 +207,11 @@ These are the highest-value items because each one fixes something the repo curr
 - **Done looks like:** wall-clock timing recorded per attempt in traces, and a report of observed p50/p95 per model to inform the catalog's latency classes.
 - **Trap:** mock timings are meaningless. The report must state whether the traces came from real providers, and refuse to draw conclusions from mock runs.
 
-### 12. Hard capability flags
-- [ ] **Why it matters:** Capabilities are all soft 0–1 scores, but some requirements are binary: JSON mode, tool use, vision, a minimum context. A model either supports structured output or it does not, and no amount of cheapness compensates.
+### 12. Hard capability flags — **DONE**
+- [x] **Why it matters:** Capabilities are all soft 0–1 scores, but some requirements are binary: JSON mode, tool use, vision, a minimum context. A model either supports structured output or it does not, and no amount of cheapness compensates.
 - **Done looks like:** optional boolean feature flags on `ModelSpec`, requestable per Task, enforced as a gate with the exclusion explained in the rationale.
 - **Trap:** flags are gates. Resist folding them into the weighted score.
+- **Shipped as:** `ModelSpec.features` (an open-ended `frozenset[str]`, same "catalog maintainer names the keys" shape as `capabilities`) and `Task.required_features`. `router.route` filters candidates to those whose `.supports()` covers every required feature *before* scoring — a pre-filter, not a weighted term — and names any excluded models plus the missing feature(s) in `decision.warnings` and the rationale. Like the context-window gate, there is no honest "next tier up" to degrade to (a tier tracks capability, not feature support), so `UnsupportedFeatureError` is raised when nothing in the registry qualifies, rather than guessing. `Broker._escalation_target` applies the identical filter so escalation cannot hand a feature-gated task to a model that lacks the feature. Not populated in `examples/starter_catalog.json`: which of those 16 real models actually support JSON mode / tool use / vision was not verified against vendor docs in this change, and guessing would violate the catalog's own honesty rule. `examples/catalog.example.json` documents the field's shape on one illustrative entry.
 
 ---
 

@@ -15,6 +15,7 @@ from .policies import (
     NoQualifiedModelError,
     Policy,
     Task,
+    UnsupportedFeatureError,
 )
 from .planner import (
     MAX_STEPS,
@@ -76,6 +77,7 @@ from .router import (
     ScoredModel,
     actual_cost,
     estimate_cost,
+    fits_features,
     route,
     score_models,
 )
@@ -130,6 +132,7 @@ __all__ = [
     "Task",
     "Triage",
     "UNKNOWN_CAPABILITY_PRIOR",
+    "UnsupportedFeatureError",
     "actual_cost",
     "audit",
     "build_provider",
@@ -138,6 +141,7 @@ __all__ = [
     "classify_with_model",
     "demo_registry",
     "estimate_cost",
+    "fits_features",
     "key_status",
     "live_pool",
     "mock_pool",

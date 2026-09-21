@@ -11,7 +11,9 @@ from switchboard import (
     Policy,
     Registry,
     Task,
+    UnsupportedFeatureError,
     demo_registry,
+    fits_features,
     route,
 )
 from switchboard.router import _quality_score
@@ -236,6 +238,93 @@ class QualityScoreScaleTests(unittest.TestCase):
         top = decision.ranked[0]
         raw = top.spec.capability_for("reasoning")
         self.assertIn(f"quality={raw:.2f} (score {top.quality_component:.2f})", decision.rationale)
+
+
+class FeatureGateTests(unittest.TestCase):
+    """Feature flags are a hard gate, not a score (ROADMAP item 12): a
+    cheaper or higher-capability model that lacks a required feature must
+    never win over one that has it."""
+
+    def setUp(self):
+        # atlas-small is cheapest and would win most policies on cost or
+        # capability alone; only atlas-mid supports vision. A gate that
+        # folded features into the weighted score, instead of filtering
+        # candidates before scoring, would still let atlas-small win here.
+        self.registry = Registry([
+            ModelSpec(
+                model_id="atlas-small", provider="mock", tier="small",
+                input_cost=0.10, output_cost=0.50, latency="fast",
+                capabilities={"extraction": 0.90},
+            ),
+            ModelSpec(
+                model_id="atlas-mid", provider="mock", tier="mid",
+                input_cost=0.80, output_cost=4.00, latency="medium",
+                capabilities={"extraction": 0.84},
+                features=frozenset({"vision", "json_mode"}),
+            ),
+            ModelSpec(
+                model_id="atlas-frontier", provider="mock", tier="frontier",
+                input_cost=3.00, output_cost=15.00, latency="slow",
+                capabilities={"extraction": 0.88},
+                features=frozenset({"tool_use"}),
+            ),
+        ])
+
+    def test_required_feature_excludes_models_that_lack_it(self):
+        task = Task(
+            prompt="describe this image", task_type="extraction", complexity=0.2,
+            required_features=frozenset({"vision"}),
+        )
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "atlas-mid")
+        self.assertIn("feature flag gate applied", decision.rationale)
+
+    def test_feature_gate_is_never_folded_into_score(self):
+        # Without the gate, cost_first would pick atlas-small: cheapest, and
+        # capability alone doesn't disqualify it. The gate must still win.
+        task = Task(
+            prompt="describe this image", task_type="extraction", complexity=0.2,
+            required_features=frozenset({"vision"}),
+        )
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertNotEqual(decision.chosen.model_id, "atlas-small")
+
+    def test_multiple_required_features_need_every_one(self):
+        task = Task(
+            prompt="x", task_type="extraction", complexity=0.2,
+            required_features=frozenset({"vision", "json_mode"}),
+        )
+        decision = route(task, self.registry, BALANCED)
+        self.assertEqual(decision.chosen.model_id, "atlas-mid")
+
+    def test_no_model_supports_the_required_feature_raises(self):
+        task = Task(
+            prompt="x", task_type="extraction", complexity=0.2,
+            required_features=frozenset({"nonexistent_feature"}),
+        )
+        with self.assertRaises(UnsupportedFeatureError):
+            route(task, self.registry, BALANCED)
+
+    def test_no_required_features_is_a_no_op(self):
+        task = Task(prompt="x", task_type="extraction", complexity=0.2)
+        decision = route(task, self.registry, COST_FIRST)
+        self.assertEqual(decision.chosen.model_id, "atlas-small")
+        self.assertNotIn("feature flag gate applied", decision.rationale)
+
+    def test_fits_features_helper(self):
+        mid = self.registry.get("atlas-mid")
+        small = self.registry.get("atlas-small")
+        needs_vision = Task(prompt="x", required_features=frozenset({"vision"}))
+        self.assertTrue(fits_features(needs_vision, mid))
+        self.assertFalse(fits_features(needs_vision, small))
+
+    def test_task_accepts_a_list_and_stores_a_frozenset(self):
+        task = Task(prompt="x", required_features=["vision", "json_mode"])
+        self.assertEqual(task.required_features, frozenset({"vision", "json_mode"}))
+
+    def test_task_empty_feature_name_rejected(self):
+        with self.assertRaises(ValueError):
+            Task(prompt="x", required_features=["vision", ""])
 
 
 if __name__ == "__main__":

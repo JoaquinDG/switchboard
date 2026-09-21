@@ -186,6 +186,29 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(escalation_target(Policy("cf", 0.30, 0.60, 0.10)), "frontier-value")
         self.assertEqual(escalation_target(Policy("qf", 0.85, 0.05, 0.10)), "frontier-premium")
 
+    def test_escalation_skips_a_tier_that_lacks_a_required_feature(self):
+        # Regression risk for ROADMAP item 12: escalating to a model that
+        # cannot do vision would trade an audit failure for a hard provider
+        # error. The mid tier has one model, and it lacks the feature; the
+        # gate must skip past it to the frontier model that has it.
+        registry = Registry([
+            ModelSpec("cheap", "labA", "small", 0.1, 0.5, latency="fast",
+                      capabilities={"reasoning": 0.5, "audit": 0.4},
+                      features=frozenset({"vision"})),
+            ModelSpec("mid-no-vision", "labB", "mid", 1.0, 5.0,
+                      capabilities={"reasoning": 0.8, "audit": 0.8}),
+            ModelSpec("frontier-vision", "labC", "frontier", 3.0, 15.0,
+                      capabilities={"reasoning": 0.95, "audit": 0.9},
+                      features=frozenset({"vision"})),
+        ])
+        task = Task(prompt="x", task_type="reasoning", complexity=0.3,
+                    required_features=frozenset({"vision"}))
+        pool = ProviderPool([ScriptedProvider(name=n, default=FAIL_VERDICT)
+                             for n in ("labA", "labB", "labC")])
+        broker = Broker(registry, pool, BALANCED)
+        target = broker._escalation_target(registry.get("cheap"), task, tried=set())
+        self.assertEqual(target.model_id, "frontier-vision")
+
     def test_attempt_roles_are_recorded(self):
         task = Task(prompt="FORCE_AUDIT_FAIL easy", task_type="extraction", complexity=0.2)
         result = make_broker().run(task)

@@ -56,6 +56,13 @@ class ModelSpec:
     context_window: int = 200_000
     # 0-1 capability score per task type, e.g. {"reasoning": 0.9, "extraction": 0.7}
     capabilities: dict[str, float] = field(default_factory=dict)
+    # Binary features this model supports, e.g. {"json_mode", "tool_use", "vision"}.
+    # Open-ended like `capabilities`' keys — the catalog maintainer names them,
+    # nothing here enforces a fixed vocabulary. Unlike capabilities, these are
+    # not scored: a model either has a feature or it doesn't, so this is a set,
+    # not a dict. See `router.route`'s feature gate for why that distinction
+    # is load-bearing (ROADMAP item 12).
+    features: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         if not self.model_id:
@@ -96,10 +103,22 @@ class ModelSpec:
                     f"{self.model_id}: capability {task_type!r} must be in [0, 1], "
                     f"got {score}"
                 )
+        if not isinstance(self.features, frozenset):
+            object.__setattr__(self, "features", frozenset(self.features))
+        for feature in self.features:
+            if not isinstance(feature, str) or not feature:
+                raise ValueError(
+                    f"{self.model_id}: feature flags must be non-empty strings, "
+                    f"got {feature!r}"
+                )
 
     def capability_for(self, task_type: str) -> float:
         """Score for a task type; unknown task types fall back to a prior."""
         return self.capabilities.get(task_type, UNKNOWN_CAPABILITY_PRIOR)
+
+    def supports(self, features: frozenset[str] | set[str]) -> bool:
+        """True if this model has every feature in `features`."""
+        return frozenset(features) <= self.features
 
 
 class Registry:
