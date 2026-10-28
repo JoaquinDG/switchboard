@@ -45,6 +45,28 @@
     "  moonshot  -> OpenAICompatibleProvider(base_url='https://api.moonshot.ai', name='moonshot')",
     "Four providers is deliberate: cross-lab auditing needs somewhere to cross to."
   ],
+  "_price_verification_log": [
+    "2026-10-28: scheduled maintenance pass re-checked prices against the",
+    "  vendor pages below. Anthropic's page (claude-opus-5, claude-fable-5,",
+    "  claude-sonnet-5, claude-haiku-4-5-20251001) was reachable and all four",
+    "  prices are UNCHANGED from the 2026-08-15 values recorded here. The",
+    "  OpenAI, Google, DeepSeek, and Moonshot pricing pages could not be",
+    "  reached from this run's environment (DNS resolution for",
+    "  developers.openai.com, ai.google.dev, api-docs.deepseek.com, and",
+    "  platform.kimi.ai failed before any HTTP request was made -- a network",
+    "  sandbox restriction in that environment, not a vendor-side signal).",
+    "  Their 12 models' prices are therefore still only verified as of",
+    "  2026-08-15 -- 74 days ago as of this check, past the 60-day",
+    "  CatalogStaleWarning threshold below. _last_verified is deliberately",
+    "  NOT bumped to today: that field means the whole catalog was checked,",
+    "  and only one of five providers actually was. Re-run this check from an",
+    "  environment that can reach those four hosts before trusting",
+    "  CatalogStaleWarning's silence on them.",
+    "  Side finding, not a price change: platform.claude.com now states the",
+    "  Claude Sonnet 5 rate recorded here ($2 in / $10 out) is permanent --",
+    "  the previously-scheduled increase to $3/$15 on 2026-09-01 was",
+    "  cancelled and will not occur."
+  ],
   "_pricing_caveats": [
     "gemini-3.7-flash is at promotional pricing through 2026-12-31; the page",
     "  states it rises to $1.50 in / $7.50 out on 2027-01-01.",
